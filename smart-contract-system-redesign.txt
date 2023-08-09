@@ -1,0 +1,29 @@
+
+DATABASES
+* Database operations have to be optimized 
+    - in terms of not repeating too often 
+    - Save changes only when all business logic is approved, since we are working with multiple databases currently 
+* Too much of repitition in database operations right now 
+* Database model classes, for SQL alchemy, have to be optimized ie. base classes for tokenswap and one-time-event totally different right now 
+* Make all database operations to follow SQLAlchemy, no direct SQL commands 
+* Remove all position based queries 
+
+PROGRAM STRUCTURE 
+* Optimize overall program structure 
+
+NEW FEATURES 
+* Rollback feature 
+* When processing blocks from the websocket API, check the blockheight of the new block vs the latest block in the database | this is to make sure none of the transactions go missing
+
+
+-----
+processBlocks 
+
+* find the last scanned block in the database 
+* find the latest block at the API 
+* for loop for lastscannedblock to latestblock 
+* processEach transaction based on business logic 
+* Update system.db to reflect currently scanned block as the latest block 
+
+* Check for local smart contract triggers 
+* Check if any token swap contract deposits have to be returned 

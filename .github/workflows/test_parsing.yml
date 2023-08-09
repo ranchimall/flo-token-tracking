@@ -1,0 +1,31 @@
+# This workflow will install Python dependencies, run tests and lint with a single version of Python
+# For more information see: https://docs.github.com/en/actions/automating-builds-and-tests/building-and-testing-python
+
+name: Test flodata parsing
+
+on:
+  push:
+    branches: [ "swap-statef-testing" ]
+  pull_request:
+    branches: [ "swap-statef-testing" ]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: self-hosted
+
+    steps:
+    - uses: actions/checkout@v3
+    - name: Set up Python 3.8
+      uses: actions/setup-python@v3
+      with:
+        python-version: "3.8"
+    - name: Install dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install arrow==1.1.0 pyflo-lib==2.0.9 requests==2.25.0
+    - name: Test with unittest
+      run: |
+        python -m unittest tests/test_parsing.py 

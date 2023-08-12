@@ -157,7 +157,7 @@ def find_input_output_addresses(transaction_data):
     querylist = []
     
     for vin in transaction_data["vin"]:
-        vinlist.append([vin["address"][0], float(vin["value"])])
+        vinlist.append([vin["addresses"][0], float(vin["value"])])
 
     totalinputval = float(transaction_data["valueIn"])
 
@@ -210,17 +210,17 @@ def rollback_database(blockNumber, dbtype, dbname):
         db_session = create_database_session_orm('token', {'token_name':dbname}, TokenBase)
         while(True):
             subqry = db_session.query(func.max(ActiveTable.id))
-            activeTable_entry = db_session.query(ActiveTable).filter(ActiveTable.id == subqry).first() 
+            activeTable_entry = db_session.query(ActiveTable).filter(ActiveTable.id == subqry).first()
             if activeTable_entry.blockNumber <= blockNumber:
                 break
             outputAddress = activeTable_entry.address
             transferAmount = activeTable_entry.transferBalance
-            inputAddress = None            
+            inputAddress = None
 
             # Find out consumedpid and partially consumed pids 
-            parentid = None 
-            orphaned_parentid = None 
-            consumedpid = None 
+            parentid = None
+            orphaned_parentid = None
+            consumedpid = None
             if activeTable_entry.parentid is not None:
                 parentid = activeTable_entry.parentid
             if activeTable_entry.orphaned_parentid is not None:
@@ -420,16 +420,16 @@ def initiate_rollback_process():
     for db in db_names: 
         if db.db_type in ['token', 'nft', 'infinite-token']:
             if db.blockNumber > rollback_block:
-                delete_database(rollback_block, f"{db.db_name}") 
+                delete_database(rollback_block, f"{db.db_name}")
             else:
-                rollback_database(rollback_block, 'token', f"{db.db_name}") 
+                rollback_database(rollback_block, 'token', f"{db.db_name}")
         elif db.db_type in ['smartcontract']:
             if db.blockNumber > rollback_block:
-                delete_database(rollback_block, f"{db.db_name}") 
+                delete_database(rollback_block, f"{db.db_name}")
             else:
                 db_split = db.db_name.rsplit('-',1)
                 db_name = {'contract_name':db_split[0], 'contract_address':db_split[1]}
-                rollback_database(rollback_block, 'smartcontract', db_name) 
+                rollback_database(rollback_block, 'smartcontract', db_name)
     
     '''
     for token_db in tokendb_set:

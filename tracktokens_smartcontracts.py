@@ -25,7 +25,7 @@ def newMultiRequest(apicall):
     current_server = serverlist[0]
     while True:
         try:
-            response = requests.get('{}api/{}'.format(current_server, apicall))
+            response = requests.get('{}api/v1/{}'.format(current_server, apicall))
         except:
             current_server = switchNeturl(current_server)
             logger.info(f"newMultiRequest() switched to {current_server}")
@@ -72,7 +72,7 @@ def process_committee_flodata(flodata):
 
 
 def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
-    response = requests.get(f'{api_url}api/addr/{admin_flo_id}')
+    response = requests.get(f'{api_url}api/v1/address/{admin_flo_id}')
     if response.status_code == 200:
         response = response.json()
     else:
@@ -82,10 +82,10 @@ def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
     committee_list = []
     response['transactions'].reverse()
     for idx, transaction in enumerate(response['transactions']):
-        transaction_info = requests.get(f'{api_url}api/tx/{transaction}')
+        transaction_info = requests.get(f'{api_url}api/v1/tx/{transaction}')
         if transaction_info.status_code == 200:
             transaction_info = transaction_info.json()
-            if transaction_info['vin'][0]['addr']==admin_flo_id and transaction_info['blocktime']<=blocktime:
+            if transaction_info['vin'][0]['addresses'][0]==admin_flo_id and transaction_info['blocktime']<=blocktime:
                 try:
                     tx_flodata = json.loads(transaction_info['floData'])
                     committee_list += process_committee_flodata(tx_flodata)
@@ -101,7 +101,7 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
     init_id = None
 
     def process_transaction(transaction_info):
-        if 'isCoinBase' in transaction_info or transaction_info['vin'][0]['addr'] != admin_flo_id or transaction_info['blocktime'] > blocktime:
+        if 'isCoinBase' in transaction_info or transaction_info['vin'][0]['addresses'][0] != admin_flo_id or transaction_info['blocktime'] > blocktime:
             return
         try:
             tx_flodata = json.loads(transaction_info['floData'])
@@ -117,13 +117,13 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
             print('Response from the Flosight API failed')
             sys.exit(0)
 
-    url = f'{api_url}api/addrs/{admin_flo_id}/txs?latest=true&mempool=false'
+    url = f'{api_url}api/v1/address/{admin_flo_id}?details=txs'
     response = send_api_request(url)
-    for transaction_info in response.get('items', []):
+    for transaction_info in response.get('txs', []):
         process_transaction(transaction_info)
 
     while 'incomplete' in response:
-        url = f'{api_url}api/addrs/{admin_flo_id}/txs?latest={latest_param}&mempool={mempool_param}&before={init_id}'
+        url = f'{api_url}api/v1/address/{admin_flo_id}/txs?latest={latest_param}&mempool={mempool_param}&before={init_id}'
         response = send_api_request(url)
         for transaction_info in response.get('items', []):
             process_transaction(transaction_info)
@@ -143,7 +143,7 @@ def find_sender_receiver(transaction_data):
 
     # todo Rule 40 - For each vin, find the feeding address and the fed value. Make an inputlist containing [inputaddress, n value]
     for vin in transaction_data["vin"]:
-        vinlist.append([vin["addr"], float(vin["value"])])
+        vinlist.append([vin["addresses"][0], float(vin["value"])])
 
     totalinputval = float(transaction_data["valueIn"])
 
@@ -341,7 +341,7 @@ def convert_datetime_to_arrowobject_regex(expiryTime):
         dt = arrow.get(datetime_str, 'ddd MMM DD YYYY HH:mm:ss').replace(tzinfo=timezone_offset)
         return dt
     else:
-        return None
+        return 0
 
 
 def is_a_contract_address(floAddress):
@@ -359,7 +359,7 @@ def fetchDynamicSwapPrice_old(contractStructure, transaction_data, blockinfo):
     # fetch transactions from the blockchain where from address : oracle-address... to address: contract address
     # find the first contract transaction which adheres to price change format
     # {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
-    response = requests.get(f'{neturl}api/addr/{oracle_address}')
+    response = requests.get(f'{neturl}api/v1/address/{oracle_address}')
     if response.status_code == 200:
         response = response.json()
         if 'transactions' not in response.keys(): # API doesn't return 'transactions' key, if 0 txs present on address
@@ -367,7 +367,7 @@ def fetchDynamicSwapPrice_old(contractStructure, transaction_data, blockinfo):
         else:
             transactions = response['transactions']
             for transaction_hash in transactions:
-                transaction_response = requests.get(f'{neturl}api/tx/{transaction_hash}')
+                transaction_response = requests.get(f'{neturl}api/v1/tx/{transaction_hash}')
                 if transaction_response.status_code == 200:
                     transaction = transaction_response.json()
                     floData = transaction['floData']
@@ -406,13 +406,13 @@ def fetchDynamicSwapPrice(contractStructure, blockinfo):
     latest_param = 'true'
     mempool_param = 'false'
     init_id = None
-    response = requests.get(f'{api_url}api/addrs/{oracle_address}/txs?latest={latest_param}&mempool={mempool_param}')
+    response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs')
     if response.status_code == 200:
         response = response.json()
-        if len(response['items']) == 0: 
+        if len(response['txs']) == 0: 
             return float(contractStructure['price'])
         else:
-            for transaction in response['items']:
+            for transaction in response['txs']:
                 floData = transaction['floData']
                 # If the blocktime of the transaction is < than the current block time
                 if transaction['time'] < blockinfo['time']:
@@ -442,10 +442,10 @@ def fetchDynamicSwapPrice(contractStructure, blockinfo):
         init_id = response['initItem']
 
     while(is_incomplete_key_present == True):
-        response = requests.get(f'{api_url}api/addrs/{oracle_address}/txs?latest={latest_param}&mempool={mempool_param}&before={init_id}')
+        response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs')
         if response.status_code == 200:
             response = response.json()
-            for transaction in response['items']:
+            for transaction in response['txs']:
                 floData = transaction['floData']
                 # If the blocktime of the transaction is < than the current block time
                 if transaction['time'] < blockinfo['time']:
@@ -479,7 +479,7 @@ def processBlock(blockindex=None, blockhash=None):
         blockhash = response['blockHash'] 
 
     blockinfo = newMultiRequest(f"block/{blockhash}")
-    pause_index = [2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467929]
+    pause_index = [2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467929, 6202174]
     if blockindex in pause_index:
         print(f'Paused at {blockindex}')
     
@@ -487,19 +487,17 @@ def processBlock(blockindex=None, blockhash=None):
     #checkLocaltriggerContracts(blockinfo)
     # Check if any deposits have to be returned 
     #checkReturnDeposits(blockinfo)
-    checkLocal_expiry_trigger_deposit(blockinfo)
+    
+    #checkLocal_expiry_trigger_deposit(blockinfo)
 
     # todo Rule 8 - read every transaction from every block to find and parse flodata
     counter = 0
     acceptedTxList = []
     # Scan every transaction
     logger.info("Before tx loop")
-    transaction_counter = 0
 
-    for transaction in blockinfo["tx"]:
-        transaction_counter = transaction_counter + 1
-        logger.info(f"Transaction {transaction_counter} : {transaction}")
-        current_index = -1
+    for transaction_data in blockinfo["txs"]:
+        transaction = transaction_data["txid"]
         
         if transaction in ['ff355c3384e2568e1dd230d5c9073618b9033c7c8b20f9e8533b5837f76bc65d', 'dd35c592fa7ba76718c894b5b3195e1151e79c5fb91472c06f416c99c7827e6d',
         '39ef49e0e06438bda462c794955735e7ea3ae81cb576ec5c97b528c8a257614c',
@@ -509,25 +507,16 @@ def processBlock(blockindex=None, blockhash=None):
         'd36b744d6b9d8a694a93476dbd1134dbdc8223cf3d1a604447acb09221aa3b49',
         '64abe801d12224d10422de88070a76ad8c6d17b533ba5288fb0961b4cbf6adf4',
         'ec9a852aa8a27877ba79ae99cc1359c0e04f6e7f3097521279bcc68e3883d760',
-        '16e836ceb973447a5fd71e969d7d4cde23330547a855731003c7fc53c86937e4']:
+        '16e836ceb973447a5fd71e969d7d4cde23330547a855731003c7fc53c86937e4',
+        'fe2ce0523254efc9eb2270f0efb837de3fc7844d9c64523b20c0ac48c21f64e6',
+        'a74a03ec1e77fa50e0b586b1e9745225ad4f78ce96ca59d6ac025f8057dd095c']:
             print(f'Paused at transaction {transaction}')
         
-
-        # TODO CLEANUP - REMOVE THIS WHILE SECTION, WHY IS IT HERE?
-        while(current_index == -1):
-            transaction_data = newMultiRequest(f"tx/{transaction}")
-            try:
-                text = transaction_data["floData"]
-                text = text.replace("\n", " \n ")
-                current_index = 2
-            except:
-                logger.info("The API has passed the Block height test but failed transaction_data['floData'] test")
-                logger.info(f"Block Height : {blockinfo['height']}")
-                logger.info(f"Transaction {transaction} data : ")
-                logger.info(transaction_data)
-                logger.info('Program will wait for 1 seconds and try to reconnect')
-                time.sleep(1)
-            
+        try:
+            text = transaction_data["floData"]
+        except:
+            text = ''
+        text = text.replace("\n", " \n ")
         # todo Rule 9 - Reject all noise transactions. Further rules are in parsing.py
         returnval = None
         parsed_data = parsing.parse_flodata(text, blockinfo, config['DEFAULT']['NET'])
@@ -542,11 +531,11 @@ def processBlock(blockindex=None, blockhash=None):
             logger.info("Transfer for the transaction %s is illegitimate. Moving on" % transaction)
 
     if len(acceptedTxList) > 0:
-        tempinfo = blockinfo['tx'].copy()
-        for tx in blockinfo['tx']:
-            if tx not in acceptedTxList:
+        tempinfo = blockinfo['txs'].copy()
+        for tx in blockinfo['txs']:
+            if tx['txid'] not in acceptedTxList:
                 tempinfo.remove(tx)
-        blockinfo['tx'] = tempinfo
+        blockinfo['txs'] = tempinfo
         updateLatestBlock(blockinfo)
 
     session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
@@ -556,12 +545,12 @@ def processBlock(blockindex=None, blockhash=None):
     session.close()
 
 
-def updateLatestTransaction(transactionData, parsed_data, db_reference, transaction_type=None ):
+def updateLatestTransaction(transactionData, parsed_data, db_reference, transactionType=None ):
     # connect to latest transaction db
     conn = create_database_connection('latest_cache', {'db_name':"latestCache"})
-    if transaction_type is None:
-        transaction_type = parsed_data['type']
-    conn.execute("INSERT INTO latestTransactions(transactionHash, blockNumber, jsonData, transactionType, parsedFloData, db_reference) VALUES (?,?,?,?,?,?)", (transactionData['txid'], transactionData['blockheight'], json.dumps(transactionData), transaction_type, json.dumps(parsed_data), db_reference))
+    if transactionType is None:
+        transactionType = parsed_data['type']
+    conn.execute("INSERT INTO latestTransactions(transactionHash, blockNumber, jsonData, transactionType, parsedFloData, db_reference) VALUES (?,?,?,?,?,?)", (transactionData['txid'], transactionData['blockheight'], json.dumps(transactionData), transactionType, json.dumps(parsed_data), db_reference))
     #conn.commit()
     conn.close()
 
@@ -588,7 +577,12 @@ def process_pids(entries, session, piditem):
     return 1
 
 
-def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None):
+def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None, transactionType=None):
+
+    # provide default transactionType value
+    if transactionType is None:
+        transactionType=parsed_data['type']
+
     session = create_database_session_orm('token', {'token_name': f"{tokenIdentification}"}, TokenBase)
     tokenAmount = float(tokenAmount)
     if isInfiniteToken == True:
@@ -601,7 +595,7 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
             receiverAddress_details.addressBalance = None
         session.add(ActiveTable(address=outputAddress, consumedpid='1', transferBalance=tokenAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
-        add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=parsed_data['type'], parsedFloData=json.dumps(parsed_data))
+        add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=transactionType, parsedFloData=json.dumps(parsed_data))
         session.commit()
         session.close()
         return 1
@@ -731,7 +725,7 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
                     session.execute('DELETE FROM activeTable WHERE id={}'.format(piditem[0]))
                 session.commit()
             
-            add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=parsed_data['type'], parsedFloData=json.dumps(parsed_data))
+            add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=transactionType, parsedFloData=json.dumps(parsed_data))
             
             session.commit()
             session.close()
@@ -770,7 +764,7 @@ def process_minimum_subscriptionamount(contractStructure, connection, blockinfo,
             tokenIdentification = contractStructure['tokenIdentification']
             contractAddress = connection.execute('SELECT * FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
             returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], blockinfo = blockinfo)
-            if returnval is None:
+            if returnval == 0:
                 logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger. THIS IS CRITICAL ERROR")
                 return
             
@@ -930,7 +924,7 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                 transaction_data['txid'] = query.transactionHash
                 transaction_data['blockheight'] = blockinfo['height']
                 returnval = transferToken(sellingToken, returnAmount, query.contractAddress, depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, blockinfo=blockinfo)
-                if returnval is None:
+                if returnval == 0:
                     logger.critical("Something went wrong in the token transfer method while return contract deposit. THIS IS CRITICAL ERROR")
                     return
                 else:
@@ -1005,7 +999,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
     # todo Rule 40 - For each vin, find the feeding address and the fed value. Make an inputlist containing [inputaddress, n value]
     for vin in transaction_data["vin"]:
-        vinlist.append([vin["addr"], float(vin["value"])])
+        vinlist.append([vin["addresses"][0], float(vin["value"])])
 
     totalinputval = float(transaction_data["valueIn"])
 
@@ -1094,12 +1088,12 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         return 0
 
                     returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0],outputlist[0], transaction_data, parsed_data, isInfiniteToken=isInfiniteToken, blockinfo = blockinfo)
-                    if returnval is None:
+                    if returnval == 0:
                         logger.info("Something went wrong in the token transfer method")
                         pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
                         return 0
                     else:
-                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transaction_type='token-transfer')
+                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transactionType='token-transfer')
 
                     # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
                     connection = create_database_connection('system_dbs', {'db_name':'system'})
@@ -1251,7 +1245,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             if partialTransferCounter == 0:
                                 # Check if the tokenAmount being transferred exists in the address & do the token transfer
                                 returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
-                                if returnval is not None:
+                                if returnval != 0:
                                     # Store participant details in the smart contract's db
                                     session.add(ContractParticipants(participantAddress=inputadd,
                                                                         tokenAmount=parsed_data['tokenAmount'],
@@ -1281,7 +1275,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     if len(firstInteractionCheck) == 0:
                                         connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
                                     connection.close()
-                                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transaction_type='ote-externaltrigger-participation')
+                                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-externaltrigger-participation')
                                     return 1
 
                                 else:
@@ -1290,7 +1284,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             elif partialTransferCounter == 1:
                                 # Transfer only part of the tokens users specified, till the time it reaches maximumamount
                                 returnval = transferToken(parsed_data['tokenIdentification'], maximumsubscriptionamount - amountDeposited, inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
-                                if returnval is not None:
+                                if returnval != 0:
                                     # Store participant details in the smart contract's db
                                     session.add(ContractParticipants(participantAddress=inputadd,
                                                                         tokenAmount=maximumsubscriptionamount - amountDeposited,
@@ -1312,7 +1306,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                                                         blockHash=transaction_data['blockhash']))
                                     session.commit()
                                     session.close()
-                                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transaction_type='ote-externaltrigger-participation')
+                                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-externaltrigger-participation')
                                     return 1
 
                                 else:
@@ -1335,7 +1329,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         
                         # Check if the tokenAmount being transferred exists in the address & do the token transfer
                         returnval = transferToken(parsed_data['tokenIdentification'], transferAmount, inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
-                        if returnval is not None:
+                        if returnval != 0:
                             # Store participant details in the smart contract's db
                             session.add(ContractParticipants(participantAddress=inputadd, tokenAmount=transferAmount, userChoice='-', transactionHash=transaction_data['txid'], blockNumber=transaction_data['blockheight'], blockHash=transaction_data['blockhash']))
 
@@ -1361,7 +1355,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             if len(firstInteractionCheck) == 0:
                                 connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
                             connection.close()
-                            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transaction_type='ote-internaltrigger-participation')
+                            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-internaltrigger-participation')
                             return 1
 
                         else:
@@ -1419,9 +1413,9 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         
                         if available_deposit_sum >= swapAmount:
                             # accepting token transfer from participant to smart contract address 
-                            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0], outputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo)
-                            if returnval is None:
-                                logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption")
+                            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0], outputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapParticipation')
+                            if returnval == 0:
+                                logger.info("ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption")
                                 return 0
                             
                             # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
@@ -1440,8 +1434,8 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             for a_deposit in available_deposits:
                                 if a_deposit.depositBalance > remaining_amount:
                                     # accepting token transfer from the contract to depositor's address 
-                                    returnval = transferToken(contractStructure['accepting_token'], remaining_amount * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo)
-                                    if returnval is None:
+                                    returnval = transferToken(contractStructure['accepting_token'], remaining_amount * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                                    if returnval == 0:
                                         logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
                                         return 0
 
@@ -1479,8 +1473,8 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                 
                                 elif a_deposit.depositBalance <= remaining_amount:
                                     # accepting token transfer from the contract to depositor's address 
-                                    returnval = transferToken(contractStructure['accepting_token'], a_deposit.depositBalance * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo)
-                                    if returnval is None:
+                                    returnval = transferToken(contractStructure['accepting_token'], a_deposit.depositBalance * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                                    if returnval == 0:
                                         logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
                                         return 0
 
@@ -1531,8 +1525,8 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     del systemdb_session
 
                             # token transfer from the contract to participant's address 
-                            returnval = transferToken(contractStructure['selling_token'], swapAmount, outputlist[0], inputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo)
-                            if returnval is None:
+                            returnval = transferToken(contractStructure['selling_token'], swapAmount, outputlist[0], inputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapParticipationSettlement')
+                            if returnval == 0:
                                 logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption")
                                 return 0
                             
@@ -1551,7 +1545,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                 systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{inputlist[0]}', '{contractStructure['selling_token']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
                             systemdb_connection.close()
 
-                            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transaction_type='tokenswap-participation')
+                            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='tokenswapParticipation')
                             pushData_SSEapi(f"Token swap successfully performed at contract {parsed_data['contractName']}-{outputlist[0]} with the transaction {transaction_data['txid']}")
 
                         else:
@@ -1603,12 +1597,12 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         return 0
                     
                     returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0],outputlist[0], transaction_data, parsed_data, isInfiniteToken=isInfiniteToken, blockinfo = blockinfo)
-                    if returnval is None:
+                    if returnval == 0:
                         logger.info("Something went wrong in the token transfer method")
                         pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
                         return 0
                     else:
-                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transaction_type='token-transfer')
+                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transactionType='token-transfer')
 
                     # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
                     connection = create_database_connection('system_dbs', {'db_name':'system'})
@@ -2042,7 +2036,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             tokenIdentification = connection.execute('SELECT * FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
                             contractAddress = connection.execute('SELECT * FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
                             returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], transaction_data, parsed_data, blockinfo = blockinfo)
-                            if returnval is None:
+                            if returnval == 0:
                                 logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Trigger")
                                 return 0
 
@@ -2084,7 +2078,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                     for winner in contractWinners:
                         winnerAmount = "%.8f" % ((winner[2] / winnerSum) * tokenSum)
                         returnval = transferToken(tokenIdentification, winnerAmount, outputlist[0], winner[1], transaction_data, parsed_data, blockinfo = blockinfo)
-                        if returnval is None:
+                        if returnval == 0:
                             logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
                             return 0
                         connection.execute(f"INSERT INTO contractwinners (participantAddress, winningAmount, userChoice, transactionHash, blockNumber, blockHash) VALUES('{winner[1]}', {winnerAmount}, '{parsed_data['triggerCondition']}', '{transaction_data['txid']}','{blockinfo['height']}','{blockinfo['hash']}');")
@@ -2163,7 +2157,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
             # Transfer the token 
             returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['depositAmount'], inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo=blockinfo)
-            if returnval is None:
+            if returnval == 0:
                 logger.info("Something went wrong in the token transfer method")
                 pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
                 return 0
@@ -2314,7 +2308,7 @@ def scanBlockchain():
     while(current_index == -1):
         response = newMultiRequest('blocks?limit=1')
         try:
-            current_index = response['blocks'][0]['height']
+            current_index = response['backend']['blocks']
         except:
             logger.info('Latest block count response from multiRequest() is not in the right format. Displaying the data received in the log below')
             logger.info(response)

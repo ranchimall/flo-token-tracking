@@ -483,12 +483,8 @@ def processBlock(blockindex=None, blockhash=None):
     if blockindex in pause_index:
         print(f'Paused at {blockindex}')
     
-    # Check smartContracts which will be triggered locally, and not by the contract committee
-    #checkLocaltriggerContracts(blockinfo)
-    # Check if any deposits have to be returned 
-    #checkReturnDeposits(blockinfo)
-    
-    #checkLocal_expiry_trigger_deposit(blockinfo)
+    # Check and perform operations which do not require blockchain intervention
+    checkLocal_expiry_trigger_deposit(blockinfo)
 
     # todo Rule 8 - read every transaction from every block to find and parse flodata
     counter = 0

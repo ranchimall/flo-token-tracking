@@ -1,14 +1,15 @@
 from sqlalchemy import create_engine, desc, func 
 from sqlalchemy.orm import sessionmaker 
-from models import SystemData, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, RejectedTransactionHistory, Base, ContractStructure, ContractBase, ContractParticipants, SystemBase, ActiveContracts, ContractAddressMapping, LatestCacheBase, ContractTransactionHistory, RejectedContractTransactionHistory, TokenContractAssociation, ContinuosContractBase, ContractStructure1, ContractParticipants1, ContractDeposits, ContractTransactionHistory1, LatestTransactions, LatestBlocks, DatabaseTypeMapping, ConsumedInfo
+from models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, TokenContractAssociation, ContractBase, ContractStructure, ContractParticipants, ContractTransactionHistory, ContractDeposits, ConsumedInfo, ContractWinners, ContinuosContractBase, ContractStructure2, ContractParticipants2, ContractDeposits2, ContractTransactionHistory2, SystemBase, ActiveContracts, SystemData, ContractAddressMapping, TokenAddressMapping, DatabaseTypeMapping, TimeActions, RejectedContractTransactionHistory, RejectedTransactionHistory, LatestCacheBase, LatestTransactions, LatestBlocks 
 import json 
-from tracktokens_smartcontracts import processTransaction 
+from tracktokens_smartcontracts import processTransaction, checkLocal_expiry_trigger_deposit, newMultiRequest
 import os 
 import logging 
 import argparse 
 import configparser 
 import shutil 
 import sys 
+import pdb
 
 
 # helper functions
@@ -174,6 +175,11 @@ else:
     ltransactions = latestCache_session.query(LatestTransactions).all()
 latestCache_session.close()
 
+# make a list of all internal tx block numbers
+systemDb_session = create_database_session_orm('system_dbs', {'db_name':'system1'}, SystemBase)
+internal_action_blocks = systemDb_session.query(ActiveContracts.blockNumber).all()
+internal_action_blocks = [block[0] for block in internal_action_blocks]
+internal_action_blocks = sorted(internal_action_blocks)
 
 lblocks_dict = {}
 for block in lblocks:
@@ -182,14 +188,31 @@ for block in lblocks:
     lblocks_dict[block_dict['blockNumber']] = {'blockHash':f"{block_dict['blockHash']}", 'jsonData':f"{block_dict['jsonData']}"}
 
 # process and rebuild all transactions 
+prev_block = 0
+
 for transaction in ltransactions:
     transaction_dict = transaction.__dict__
+    current_block = transaction_dict['blockNumber']
+
+    # Check if any internal action block lies between prev_block and current_block
+    for internal_block in internal_action_blocks:
+        if prev_block < internal_block <= current_block:
+            logger.info(f'Processing block {internal_block}') 
+            # Get block details 
+            response = newMultiRequest(f"block-index/{internal_block}") 
+            blockhash = response['blockHash'] 
+            blockinfo = newMultiRequest(f"block/{blockhash}")
+            # Call your function here, passing the internal block to it
+            checkLocal_expiry_trigger_deposit(blockinfo)
+
     transaction_data = json.loads(transaction_dict['jsonData'])
     parsed_flodata = json.loads(transaction_dict['parsedFloData'])
     try:
         block_info = json.loads(lblocks_dict[transaction_dict['blockNumber']]['jsonData'])
         processTransaction(transaction_data, parsed_flodata, block_info)
+        prev_block = current_block
     except:
+        prev_block = current_block
         continue
 
 # copy the old block data 

@@ -206,6 +206,7 @@ for transaction in ltransactions:
             checkLocal_expiry_trigger_deposit(blockinfo)
 
     transaction_data = json.loads(transaction_dict['jsonData'])
+    transaction_data = newMultiRequest(f"tx/{transaction_dict['transactionHash']}")
     parsed_flodata = json.loads(transaction_dict['parsedFloData'])
     try:
         block_info = json.loads(lblocks_dict[transaction_dict['blockNumber']]['jsonData'])

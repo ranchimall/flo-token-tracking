@@ -25,7 +25,7 @@ def newMultiRequest(apicall):
     current_server = serverlist[0]
     while True:
         try:
-            response = requests.get('{}api/v1/{}'.format(current_server, apicall))
+            response = requests.get(f"{current_server}api/v1/{apicall}", verify=API_VERIFY)
         except:
             current_server = switchNeturl(current_server)
             logger.info(f"newMultiRequest() switched to {current_server}")
@@ -72,7 +72,7 @@ def process_committee_flodata(flodata):
 
 
 def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
-    response = requests.get(f'{api_url}api/v1/address/{admin_flo_id}')
+    response = requests.get(f'{api_url}api/v1/address/{admin_flo_id}', verify=API_VERIFY)
     if response.status_code == 200:
         response = response.json()
     else:
@@ -82,7 +82,7 @@ def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
     committee_list = []
     response['transactions'].reverse()
     for idx, transaction in enumerate(response['transactions']):
-        transaction_info = requests.get(f'{api_url}api/v1/tx/{transaction}')
+        transaction_info = requests.get(f'{api_url}api/v1/tx/{transaction}', verify=API_VERIFY)
         if transaction_info.status_code == 200:
             transaction_info = transaction_info.json()
             if transaction_info['vin'][0]['addresses'][0]==admin_flo_id and transaction_info['blocktime']<=blocktime:
@@ -110,7 +110,7 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
             pass
 
     def send_api_request(url):
-        response = requests.get(url)
+        response = requests.get(url, verify=API_VERIFY)
         if response.status_code == 200:
             return response.json()
         else:
@@ -359,7 +359,7 @@ def fetchDynamicSwapPrice_old(contractStructure, transaction_data, blockinfo):
     # fetch transactions from the blockchain where from address : oracle-address... to address: contract address
     # find the first contract transaction which adheres to price change format
     # {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
-    response = requests.get(f'{neturl}api/v1/address/{oracle_address}')
+    response = requests.get(f'{neturl}api/v1/address/{oracle_address}', verify=API_VERIFY)
     if response.status_code == 200:
         response = response.json()
         if 'transactions' not in response.keys(): # API doesn't return 'transactions' key, if 0 txs present on address
@@ -367,7 +367,7 @@ def fetchDynamicSwapPrice_old(contractStructure, transaction_data, blockinfo):
         else:
             transactions = response['transactions']
             for transaction_hash in transactions:
-                transaction_response = requests.get(f'{neturl}api/v1/tx/{transaction_hash}')
+                transaction_response = requests.get(f'{neturl}api/v1/tx/{transaction_hash}', verify=API_VERIFY)
                 if transaction_response.status_code == 200:
                     transaction = transaction_response.json()
                     floData = transaction['floData']
@@ -406,7 +406,7 @@ def fetchDynamicSwapPrice(contractStructure, blockinfo):
     latest_param = 'true'
     mempool_param = 'false'
     init_id = None
-    response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs')
+    response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs', verify=API_VERIFY)
     if response.status_code == 200:
         response = response.json()
         if len(response['txs']) == 0: 
@@ -442,7 +442,7 @@ def fetchDynamicSwapPrice(contractStructure, blockinfo):
         init_id = response['initItem']
 
     while(is_incomplete_key_present == True):
-        response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs')
+        response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs', verify=API_VERIFY)
         if response.status_code == 200:
             response = response.json()
             for transaction in response['txs']:
@@ -479,7 +479,7 @@ def processBlock(blockindex=None, blockhash=None):
         blockhash = response['blockHash'] 
 
     blockinfo = newMultiRequest(f"block/{blockhash}")
-    pause_index = [2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467929, 6202174]
+    pause_index = [2211686, 2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467929, 6202174, 2511353, 2511356, 2511361]
     if blockindex in pause_index:
         print(f'Paused at {blockindex}')
     
@@ -505,8 +505,11 @@ def processBlock(blockindex=None, blockhash=None):
         'ec9a852aa8a27877ba79ae99cc1359c0e04f6e7f3097521279bcc68e3883d760',
         '16e836ceb973447a5fd71e969d7d4cde23330547a855731003c7fc53c86937e4',
         'fe2ce0523254efc9eb2270f0efb837de3fc7844d9c64523b20c0ac48c21f64e6',
-        'a74a03ec1e77fa50e0b586b1e9745225ad4f78ce96ca59d6ac025f8057dd095c']:
+        'a74a03ec1e77fa50e0b586b1e9745225ad4f78ce96ca59d6ac025f8057dd095c',
+        'e7b3571ca84f20fda60ccc6f03b50f2fffff03094f1fcd42110f85d63a50fe34',
+        '26f8aaf809240d3da0ac1ee5666a79ab26e2c395f22ed060e6875557dc561cc5']:
             print(f'Paused at transaction {transaction}')
+            pdb.set_trace()
         
         try:
             text = transaction_data["floData"]
@@ -836,7 +839,7 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                 tx_type = 'trigger'
                 data = [blockinfo['hash'], blockinfo['height'] , blockinfo['time'], blockinfo['size'], tx_type]
 
-                response = requests.get(f'https://stdops.ranchimall.net/hash?data={data}')
+                response = requests.get(f'https://stdops.ranchimall.net/hash?data={data}', verify=API_VERIFY)
                 if response.status_code == 200:
                     txid = response.json()
                 elif response.status_code == 404:
@@ -990,10 +993,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
     vinlist = []
     querylist = []
 
-    #totalinputval = 0
-    #inputadd = ''
-
-    # todo Rule 40 - For each vin, find the feeding address and the fed value. Make an inputlist containing [inputaddress, n value]
+    # Extract VIN information
     for vin in transaction_data["vin"]:
         vinlist.append([vin["addresses"][0], float(vin["value"])])
 
@@ -1011,25 +1011,22 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
     inputlist = [vinlist[0][0], totalinputval]
     inputadd = vinlist[0][0]
 
-    # todo Rule 42 - If the number of vout is more than 2, reject the transaction
+    # Check if the number of vout is more than 2 (Rule 42)
     if len(transaction_data["vout"]) > 2:
-        logger.info(f"System has found more than 2 address as part of vout. Transaction {transaction_data['txid']} is rejected")
+        logger.info(f"System has found more than 2 addresses as part of vout. Transaction {transaction_data['txid']} is rejected")
         return 0
 
-    # todo Rule 43 - A transaction accepted by the system has two vouts, 1. The FLO address of the receiver
-    #      2. Flo address of the sender as change address.  If the vout address is change address, then the other adddress
-    #     is the recevier address
-
+    # Extract output addresses (Rule 43)
     outputlist = []
     addresscounter = 0
     inputcounter = 0
     for obj in transaction_data["vout"]:
-        if 'type' not in obj["scriptPubKey"].keys():
+        if 'addresses' not in obj["scriptPubKey"]:
             continue
-        if obj["scriptPubKey"]["type"] in ["pubkeyhash","scripthash"]:
-            addresscounter = addresscounter + 1
+        if obj["scriptPubKey"]["addresses"]:
+            addresscounter += 1
             if inputlist[0] == obj["scriptPubKey"]["addresses"][0]:
-                inputcounter = inputcounter + 1
+                inputcounter += 1
                 continue
             outputlist.append([obj["scriptPubKey"]["addresses"][0], obj["value"]])
 
@@ -2156,7 +2153,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
             if returnval == 0:
                 logger.info("Something went wrong in the token transfer method")
                 pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
-                return 0
+                return 0 
 
             # Push the deposit transaction into deposit database contract database 
             session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
@@ -2194,10 +2191,10 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
             # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
             systemdb_connection = create_database_connection('system_dbs', {'db_name':'system'})
-            firstInteractionCheck = connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+            firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
             if len(firstInteractionCheck) == 0:
-                connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
-            connection.close()
+                systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+            systemdb_connection.close()
             
             updateLatestTransaction(transaction_data, parsed_data , f"{parsed_data['contractName']}-{outputlist[0]}")
             return 1
@@ -2411,6 +2408,14 @@ serverlist = serverlist.split(',')
 neturl = config['DEFAULT']['FLOSIGHT_NETURL']
 api_url = neturl
 tokenapi_sse_url = config['DEFAULT']['TOKENAPI_SSE_URL']
+API_VERIFY = config['DEFAULT']['API_VERIFY']
+if API_VERIFY == 'False':
+    API_VERIFY = False
+elif API_VERIFY == 'True':
+    API_VERIFY = True
+else:
+    API_VERIFY = True
+
 
 IGNORE_BLOCK_LIST = config['DEFAULT']['IGNORE_BLOCK_LIST'].split(',')
 IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]

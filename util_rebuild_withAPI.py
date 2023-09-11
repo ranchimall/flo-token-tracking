@@ -81,7 +81,9 @@ logger.addHandler(stream_handler)
 parser = argparse.ArgumentParser(description='Script tracks RMT using FLO data on the FLO blockchain - https://flo.cash')
 parser.add_argument('-rb', '--toblocknumer', nargs='?', type=int, help='Forward to the specified block number')
 parser.add_argument('-r', '--blockcount', nargs='?', type=int, help='Forward to the specified block count') 
-args = parser.parse_args() 
+parser.add_argument('-to', '--to_blockNumber', nargs='?', type=int, help='Process until the specified block number')  # New argument
+args = parser.parse_args()
+
 
 if (args.blockcount and args.toblocknumber):
     print("You can only specify one of the options -b or -c")
@@ -196,6 +198,7 @@ for transaction in ltransactions:
 
     # Check if any internal action block lies between prev_block and current_block
     for internal_block in internal_action_blocks:
+
         if prev_block < internal_block <= current_block:
             logger.info(f'Processing block {internal_block}') 
             # Get block details 
@@ -215,6 +218,11 @@ for transaction in ltransactions:
     except:
         prev_block = current_block
         continue
+
+    # Check if the current block exceeds the specified "to_blockNumber"
+    if current_block >= args.to_blockNumber:
+        logger.info(f"Reached the specified block number {args.to_blockNumber}. Stopping processing.")
+        break
 
 # copy the old block data 
 old_latest_cache = create_database_connection('system_dbs', {'db_name':'latestCache1'})

@@ -285,6 +285,7 @@ def add_contract_transaction_history(contract_name, contract_address, transactio
     session.close()
 
 
+
 def rejected_transaction_history(transaction_data, parsed_data, sourceFloAddress, destFloAddress, rejectComment):
     session = create_database_session_orm('system_dbs', {'db_name': "system"}, TokenBase)
     blockchainReference = neturl + 'tx/' + transaction_data['txid']
@@ -479,7 +480,7 @@ def processBlock(blockindex=None, blockhash=None):
         blockhash = response['blockHash'] 
 
     blockinfo = newMultiRequest(f"block/{blockhash}")
-    pause_index = [2211686, 2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467929, 6202174, 2511353, 2511356, 2511361]
+    pause_index = [2211686, 2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467886, 6202174, 2511353, 2511356, 2511361, 2686912, 2704476, 2706050, 2706685]
     if blockindex in pause_index:
         print(f'Paused at {blockindex}')
     
@@ -507,7 +508,20 @@ def processBlock(blockindex=None, blockhash=None):
         'fe2ce0523254efc9eb2270f0efb837de3fc7844d9c64523b20c0ac48c21f64e6',
         'a74a03ec1e77fa50e0b586b1e9745225ad4f78ce96ca59d6ac025f8057dd095c',
         'e7b3571ca84f20fda60ccc6f03b50f2fffff03094f1fcd42110f85d63a50fe34',
-        '26f8aaf809240d3da0ac1ee5666a79ab26e2c395f22ed060e6875557dc561cc5']:
+        '26f8aaf809240d3da0ac1ee5666a79ab26e2c395f22ed060e6875557dc561cc5',
+        '34e4dc385deac31a7f54b13e7c5890b45a604d93094c84ec607632ac5fb7800f',
+        '8d74d91388ec766663ee550ae9e626b74301153b10401c4ec6b70c19fa9483c7',
+        'd48590f6907976b63b4d5eac8082fe0bbed3b8a68e30de960e77619d29e32e78',
+        '993ce60ea950a1a0677bd8f25ad0aac92344dd33c4d3f99e5ecdbdf77584cd35',
+        'd35a717e6fc05b3fdbbc926ceb67d7c1180c01e6cf8f287b1d488f44a12b3039',
+        'b810d06779fb6050fbdfc0a7e6f07e21f08565941fef380d677daea80a65d2af',
+        '6de645d08c0984dfd041f6f3761ccaafeb9c8ee4419404f15af7a2041f22a9de',
+        '1c74b09dccf7cb27bb6cb6b4da82862121872cd26ca1d28e11b4d93ca19c7374',
+        '4f5ffa812279d951f1e44e0b09f663a98a19707cb57d47b40c9a99dafd4346df',
+        'ca362becaec92a4079e53afd59a220a27dfb71b7c9e88f74ebe6b29ad2074ded',
+        '627819a91833b0a94fe37d06d298e8169b8d45ed6678f5f79a5f6615302f75df',
+        '93a964b7ccfddc9cd83dc512fd0fb5624a226c278186ea23ac2ccc0becb0c002',
+        'b91c2bed4a0f58e86e12ed260b72c80e98f38c78a9b778d4c9af46ba5b3c1eed']:
             print(f'Paused at transaction {transaction}')
             pdb.set_trace()
         
@@ -577,10 +591,14 @@ def process_pids(entries, session, piditem):
 
 
 def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None, transactionType=None):
-
+    
     # provide default transactionType value
     if transactionType is None:
-        transactionType=parsed_data['type']
+        try:
+            transactionType=parsed_data['type']
+        except:
+            print("This is a critical error. Please report to developers")
+            pdb.set_trace()
 
     session = create_database_session_orm('token', {'token_name': f"{tokenIdentification}"}, TokenBase)
     tokenAmount = float(tokenAmount)
@@ -736,6 +754,9 @@ def trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_da
     if tokenAmount_sum <= 0:
         # Add transaction to ContractTransactionHistory
         add_contract_transaction_history(contract_name=contract_name, contract_address=contract_address, transactionType='trigger', transactionSubType='zero-participation', sourceFloAddress='', destFloAddress='', transferAmount=0, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+        # Add transaction to latestCache
+        updateLatestTransaction(transaction_data, parsed_data , f"{contract_name}-{contract_address}")
+
     else:
         payeeAddress = json.loads(contractStructure['payeeAddress'])
         tokenIdentification = contractStructure['tokenIdentification']
@@ -749,6 +770,8 @@ def trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_da
 
             # Add transaction to ContractTransactionHistory
             add_contract_transaction_history(contract_name=contract_name, contract_address=contract_address, transactionType='trigger', transactionSubType=transaction_subType, sourceFloAddress=contract_address, destFloAddress=floaddress, transferAmount=transferAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+            # Add transaction to latestCache
+            updateLatestTransaction(transaction_data, parsed_data , f"{contract_name}-{contract_address}")
     return 1
 
 
@@ -761,16 +784,17 @@ def process_minimum_subscriptionamount(contractStructure, connection, blockinfo,
 
         for participant in contractParticipants:
             tokenIdentification = contractStructure['tokenIdentification']
-            contractAddress = connection.execute('SELECT * FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
-            returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], blockinfo = blockinfo)
+            contractAddress = connection.execute('SELECT value FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
+            #transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None, transactionType=None)
+            returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], blockinfo = blockinfo, transaction_data=transaction_data,  parsed_data=parsed_data)
             if returnval == 0:
                 logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger. THIS IS CRITICAL ERROR")
                 return
             
             connection.execute('UPDATE contractparticipants SET winningAmount="{}" WHERE participantAddress="{}" AND transactionHash="{}"'.format(participant[1], participant[0], participant[2]))
 
-        # add transaction to ContractTransactionHistory
-        add_contract_transaction_history(contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transactionType=parsed_data['type'], transactionSubType='minimumsubscriptionamount-payback', sourceFloAddress=None, destFloAddress=None, transferAmount=None, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+            # add transaction to ContractTransactionHistory
+            add_contract_transaction_history(contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transactionType=parsed_data['type'], transactionSubType='minimumsubscriptionamount-payback', sourceFloAddress=contractAddress, destFloAddress=participant[0], transferAmount=participant[1], blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
         return 1
     else:
         return 0
@@ -782,7 +806,7 @@ def process_maximum_subscriptionamount(contractStructure, connection, status, bl
     if tokenAmount_sum >= maximumsubscriptionamount:
         # Trigger the contract
         if status == 'close':
-            success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
+            success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transaction_subType='maximumsubscriptionamount')
             if not success_returnval:
                 return 0
         return 1
@@ -837,7 +861,7 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
             if contractStructure['contractType'] == 'one-time-event':
                 # TODO - FIGURE A BETTER SOLUTION FOR THIS 
                 tx_type = 'trigger'
-                data = [blockinfo['hash'], blockinfo['height'] , blockinfo['time'], blockinfo['size'], tx_type]
+                data = [blockinfo['hash'], blockinfo['height'], blockinfo['time'], blockinfo['size'], tx_type]
 
                 response = requests.get(f'https://stdops.ranchimall.net/hash?data={data}', verify=API_VERIFY)
                 if response.status_code == 200:
@@ -845,11 +869,16 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                 elif response.status_code == 404:
                     logger.info('Internal trigger has failed')
                     sys.exit(0)
-
+                
                 transaction_data = {}
                 transaction_data['txid'] = txid
+                transaction_data['blockheight'] = blockinfo['height']
+                transaction_data['time'] = blockinfo['time']
+
                 parsed_data = {}
                 parsed_data['type'] = tx_type
+                parsed_data['contractName'] = query.contractName
+                parsed_data['contractAddress'] = query.contractAddress
 
                 activecontracts_table_info = systemdb_session.query(ActiveContracts.blockHash, ActiveContracts.incorporationDate).filter(ActiveContracts.contractName==query.contractName, ActiveContracts.contractAddress==query.contractAddress, ActiveContracts.status=='active').first()
 
@@ -918,10 +947,13 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                 sellingToken = contract_db.query(ContractStructure.value).filter(ContractStructure.attribute == 'selling_token').first()[0]
                 tx_block_string = f"{query.transactionHash}{blockinfo['height']}".encode('utf-8').hex()
                 parsed_data = {}
-                parsed_data['type'] = 'expired_deposit'
+                parsed_data['type'] = 'smartContractDepositReturn'
+                parsed_data['contractName'] = query.contractName
+                parsed_data['contractAddress'] = query.contractAddress
                 transaction_data = {}
                 transaction_data['txid'] = query.transactionHash
                 transaction_data['blockheight'] = blockinfo['height']
+                transaction_data['time'] = blockinfo['time']
                 returnval = transferToken(sellingToken, returnAmount, query.contractAddress, depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, blockinfo=blockinfo)
                 if returnval == 0:
                     logger.critical("Something went wrong in the token transfer method while return contract deposit. THIS IS CRITICAL ERROR")
@@ -1287,6 +1319,9 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                                                         blockHash=transaction_data['blockhash']))
                                     session.commit()
                                     session.close()
+
+                                    # Store transfer as part of ContractTransactionHistory
+                                    add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=maximumsubscriptionamount - amountDeposited, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
 
                                     # Store a mapping of participant address -> Contract participated in
                                     session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
@@ -2027,7 +2062,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
                         for participant in contractParticipants:
                             tokenIdentification = connection.execute('SELECT * FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
-                            contractAddress = connection.execute('SELECT * FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
+                            contractAddress = connection.execute('SELECT value FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
                             returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], transaction_data, parsed_data, blockinfo = blockinfo)
                             if returnval == 0:
                                 logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Trigger")
@@ -2074,7 +2109,8 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         if returnval == 0:
                             logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
                             return 0
-                        connection.execute(f"INSERT INTO contractwinners (participantAddress, winningAmount, userChoice, transactionHash, blockNumber, blockHash) VALUES('{winner[1]}', {winnerAmount}, '{parsed_data['triggerCondition']}', '{transaction_data['txid']}','{blockinfo['height']}','{blockinfo['hash']}');")
+                        pdb.set_trace()
+                        connection.execute(f"INSERT INTO contractwinners (participantAddress, winningAmount, userChoice, transactionHash, blockNumber, blockHash, referenceTxHash) VALUES('{winner[1]}', {winnerAmount}, '{parsed_data['triggerCondition']}', '{transaction_data['txid']}','{blockinfo['height']}','{blockinfo['hash']}', '{winner[4]}');")
 
                 # add transaction to ContractTransactionHistory
                 blockchainReference = neturl + 'tx/' + transaction_data['txid']
@@ -2299,7 +2335,7 @@ def scanBlockchain():
     # Find current block height
     current_index = -1
     while(current_index == -1):
-        response = newMultiRequest('blocks?limit=1')
+        response = newMultiRequest('blocks')
         try:
             current_index = response['backend']['blocks']
         except:

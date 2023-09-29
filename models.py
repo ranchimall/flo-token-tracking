@@ -157,6 +157,7 @@ class ContractWinners(ContractBase):
     transactionHash = Column('transactionHash', String)
     blockNumber = Column('blockNumber', Integer)
     blockHash = Column('blockHash', String)
+    referenceTxHash = Column('referenceTxHash', String)
 
 
 class ContractStructure2(ContinuosContractBase):

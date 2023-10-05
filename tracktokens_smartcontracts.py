@@ -480,9 +480,6 @@ def processBlock(blockindex=None, blockhash=None):
         blockhash = response['blockHash'] 
 
     blockinfo = newMultiRequest(f"block/{blockhash}")
-    pause_index = [2211686, 2211699, 2211700, 2211701, 2170000, 2468107, 2468108, 2489267, 2449017, 2509873, 2509874, 2291729, 2467886, 6202174, 2511353, 2511356, 2511361, 2686912, 2704476, 2706050, 2706685]
-    if blockindex in pause_index:
-        print(f'Paused at {blockindex}')
     
     # Check and perform operations which do not require blockchain intervention
     checkLocal_expiry_trigger_deposit(blockinfo)
@@ -496,35 +493,6 @@ def processBlock(blockindex=None, blockhash=None):
     for transaction_data in blockinfo["txs"]:
         transaction = transaction_data["txid"]
         
-        if transaction in ['ff355c3384e2568e1dd230d5c9073618b9033c7c8b20f9e8533b5837f76bc65d', 'dd35c592fa7ba76718c894b5b3195e1151e79c5fb91472c06f416c99c7827e6d',
-        '39ef49e0e06438bda462c794955735e7ea3ae81cb576ec5c97b528c8a257614c',
-        'c58bebd583a5b24a9d342712efb9e4b2eac33fe36d8ebe9119126c02f766986c',
-        'ec6604d147d99ec41f05dec82f9c241815358015904fad37ace061d7580b178e',
-        '39ef49e0e06438bda462c794955735e7ea3ae81cb576ec5c97b528c8a257614c',
-        'd36b744d6b9d8a694a93476dbd1134dbdc8223cf3d1a604447acb09221aa3b49',
-        '64abe801d12224d10422de88070a76ad8c6d17b533ba5288fb0961b4cbf6adf4',
-        'ec9a852aa8a27877ba79ae99cc1359c0e04f6e7f3097521279bcc68e3883d760',
-        '16e836ceb973447a5fd71e969d7d4cde23330547a855731003c7fc53c86937e4',
-        'fe2ce0523254efc9eb2270f0efb837de3fc7844d9c64523b20c0ac48c21f64e6',
-        'a74a03ec1e77fa50e0b586b1e9745225ad4f78ce96ca59d6ac025f8057dd095c',
-        'e7b3571ca84f20fda60ccc6f03b50f2fffff03094f1fcd42110f85d63a50fe34',
-        '26f8aaf809240d3da0ac1ee5666a79ab26e2c395f22ed060e6875557dc561cc5',
-        '34e4dc385deac31a7f54b13e7c5890b45a604d93094c84ec607632ac5fb7800f',
-        '8d74d91388ec766663ee550ae9e626b74301153b10401c4ec6b70c19fa9483c7',
-        'd48590f6907976b63b4d5eac8082fe0bbed3b8a68e30de960e77619d29e32e78',
-        '993ce60ea950a1a0677bd8f25ad0aac92344dd33c4d3f99e5ecdbdf77584cd35',
-        'd35a717e6fc05b3fdbbc926ceb67d7c1180c01e6cf8f287b1d488f44a12b3039',
-        'b810d06779fb6050fbdfc0a7e6f07e21f08565941fef380d677daea80a65d2af',
-        '6de645d08c0984dfd041f6f3761ccaafeb9c8ee4419404f15af7a2041f22a9de',
-        '1c74b09dccf7cb27bb6cb6b4da82862121872cd26ca1d28e11b4d93ca19c7374',
-        '4f5ffa812279d951f1e44e0b09f663a98a19707cb57d47b40c9a99dafd4346df',
-        'ca362becaec92a4079e53afd59a220a27dfb71b7c9e88f74ebe6b29ad2074ded',
-        '627819a91833b0a94fe37d06d298e8169b8d45ed6678f5f79a5f6615302f75df',
-        '93a964b7ccfddc9cd83dc512fd0fb5624a226c278186ea23ac2ccc0becb0c002',
-        'b91c2bed4a0f58e86e12ed260b72c80e98f38c78a9b778d4c9af46ba5b3c1eed']:
-            print(f'Paused at transaction {transaction}')
-            pdb.set_trace()
-        
         try:
             text = transaction_data["floData"]
         except:
@@ -533,7 +501,7 @@ def processBlock(blockindex=None, blockhash=None):
         # todo Rule 9 - Reject all noise transactions. Further rules are in parsing.py
         returnval = None
         parsed_data = parsing.parse_flodata(text, blockinfo, config['DEFAULT']['NET'])
-        if parsed_data['type'] != 'noise':
+        if parsed_data['type'] not in ['noise', None, '']:
             logger.info(f"Processing transaction {transaction}")
             logger.info(f"flodata {text} is parsed to {parsed_data}")
             returnval = processTransaction(transaction_data, parsed_data, blockinfo)
@@ -598,7 +566,6 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
             transactionType=parsed_data['type']
         except:
             print("This is a critical error. Please report to developers")
-            pdb.set_trace()
 
     session = create_database_session_orm('token', {'token_name': f"{tokenIdentification}"}, TokenBase)
     tokenAmount = float(tokenAmount)
@@ -883,10 +850,10 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                 activecontracts_table_info = systemdb_session.query(ActiveContracts.blockHash, ActiveContracts.incorporationDate).filter(ActiveContracts.contractName==query.contractName, ActiveContracts.contractAddress==query.contractAddress, ActiveContracts.status=='active').first()
 
                 if 'exitconditions' in contractStructure: # Committee trigger contract type
-                    tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
                     # maximumsubscription check, if reached then expire the contract 
                     if 'maximumsubscriptionamount' in contractStructure:
                         maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Expire the contract
                             close_expire_contract(contractStructure, 'expired', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], None, query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
@@ -901,10 +868,11 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                         close_expire_contract(contractStructure, 'expired', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], None, query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
                 
                 elif 'payeeAddress' in contractStructure: # Internal trigger contract type
-                    tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                    
                     # maximumsubscription check, if reached then trigger the contract
                     if 'maximumsubscriptionamount' in contractStructure:
                         maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Trigger the contract
                             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
@@ -2109,7 +2077,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         if returnval == 0:
                             logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
                             return 0
-                        pdb.set_trace()
+                        
                         connection.execute(f"INSERT INTO contractwinners (participantAddress, winningAmount, userChoice, transactionHash, blockNumber, blockHash, referenceTxHash) VALUES('{winner[1]}', {winnerAmount}, '{parsed_data['triggerCondition']}', '{transaction_data['txid']}','{blockinfo['height']}','{blockinfo['hash']}', '{winner[4]}');")
 
                 # add transaction to ContractTransactionHistory

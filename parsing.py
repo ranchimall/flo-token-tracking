@@ -1102,6 +1102,7 @@ def parse_flodata(text, blockinfo, net):
                 return outputreturn('one-time-event-userchoice-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", f"{contract_conditions['userchoices']}", f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
             elif 'payeeAddress' in contract_conditions.keys():
                 contract_conditions['payeeAddress'] = find_word_index_fromstring(clean_text,contract_conditions['payeeAddress'])
+                
                 # check if colon exists in the payeeAddress string
                 if ':' in contract_conditions['payeeAddress']:
                     colon_split = contract_conditions['payeeAddress'].split(':')
@@ -1111,9 +1112,14 @@ def parse_flodata(text, blockinfo, net):
                     payeeAddress_split_dictionary = {}
                     for idx, item in enumerate(colon_split):
                         if idx%2 == 0:
-                            # check if floid 
+                            # Check if floid 
                             if not check_flo_address(item, is_testnet):
                                 return outputreturn('noise')
+                            # Add check to make sure payeeAddress is not contractAddress
+                            if contract_address == item:
+                                logger.debug('payeeAddress is same as contract address')
+                                return outputreturn('noise')
+                            
                         if idx%2 == 1:
                             # check if number
                             try:
@@ -1124,6 +1130,7 @@ def parse_flodata(text, blockinfo, net):
                                 split_total += item
                             except:
                                 return outputreturn('noise')
+                            
                     if split_total != 100:
                         return outputreturn('noise')
                     else:
@@ -1132,9 +1139,14 @@ def parse_flodata(text, blockinfo, net):
                 else:  
                     if not check_flo_address(contract_conditions['payeeAddress'], is_testnet):
                         return outputreturn('noise')
-                    else:
-                        contract_conditions['payeeAddress'] = {f"{contract_conditions['payeeAddress']}":100}
-                        return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
+
+                    # Add check to make sure payeeAddress is not contractAddress
+                    if contract_address == contract_conditions['payeeAddress']:
+                        logger.debug('payeeAddress is same as contract address')
+                        return outputreturn('noise')
+                    
+                    contract_conditions['payeeAddress'] = {f"{contract_conditions['payeeAddress']}":100}
+                    return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
 
     if first_classification['categorization'] == 'smart-contract-participation-deposit-C':
         # either participation of one-time-event contract or 

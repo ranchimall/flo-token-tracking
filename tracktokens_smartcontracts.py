@@ -8,12 +8,12 @@ import sys
 import pyflo 
 import requests 
 import socketio 
-from sqlalchemy import create_engine, func, and_
+from sqlalchemy import create_engine, func, and_  
 from sqlalchemy.orm import sessionmaker 
 import time 
 import arrow 
 import parsing 
-import re
+import re 
 from datetime import datetime 
 from ast import literal_eval 
 from models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, TokenContractAssociation, ContractBase, ContractStructure, ContractParticipants, ContractTransactionHistory, ContractDeposits, ConsumedInfo, ContractWinners, ContinuosContractBase, ContractStructure2, ContractParticipants2, ContractDeposits2, ContractTransactionHistory2, SystemBase, ActiveContracts, SystemData, ContractAddressMapping, TokenAddressMapping, DatabaseTypeMapping, TimeActions, RejectedContractTransactionHistory, RejectedTransactionHistory, LatestCacheBase, LatestTransactions, LatestBlocks 
@@ -285,7 +285,6 @@ def add_contract_transaction_history(contract_name, contract_address, transactio
     session.close()
 
 
-
 def rejected_transaction_history(transaction_data, parsed_data, sourceFloAddress, destFloAddress, rejectComment):
     session = create_database_session_orm('system_dbs', {'db_name': "system"}, TokenBase)
     blockchainReference = neturl + 'tx/' + transaction_data['txid']
@@ -492,6 +491,9 @@ def processBlock(blockindex=None, blockhash=None):
 
     for transaction_data in blockinfo["txs"]:
         transaction = transaction_data["txid"]
+
+        # if transaction == 'cd1176b2567ca2ae15624962008d3d935ebd36b99e419f5ad745dadd5858669f':
+        #     pdb.set_trace()
         
         try:
             text = transaction_data["floData"]
@@ -822,6 +824,7 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
     for query in active_contracts:
         query_time = convert_datetime_to_arrowobject(query.time)
         blocktime = parsing.arrow.get(blockinfo['time']).to('Asia/Kolkata')
+
         if query.activity == 'contract-time-trigger':
             contractStructure = extract_contractStructure(query.contractName, query.contractAddress)
             connection = create_database_connection('smart_contract', {'contract_name':f"{query.contractName}", 'contract_address':f"{query.contractAddress}"})
@@ -875,6 +878,7 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                         tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Trigger the contract
+                            # pdb.set_trace()
                             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
                             if not success_returnval:
                                 return 0
@@ -889,6 +893,8 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                                 return
                         
                         # Trigger the contract
+                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                        # pdb.set_trace()
                         success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='expiryTime')
                         if not success_returnval:
                             return 0
@@ -1226,6 +1232,11 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                 return 0
                             else:
                                 partialTransferCounter = 1
+                                rejectComment = f"Transaction {transaction_data['txid']} rejected as the partial transfer of token {contractStructure['tokenIdentification'].upper()} is not allowed, for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+                                logger.info(rejectComment)
+                                rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                                pushData_SSEapi(rejectComment)
+                                return 0
 
                     # Check if exitcondition exists as part of contractstructure and is given in right format
                     if 'exitconditions' in contractStructure:
@@ -1939,7 +1950,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                 participantAdd_txhash = connection.execute(f"SELECT sourceFloAddress, transactionHash FROM contractTransactionHistory WHERE transactionType != 'incorporation'").fetchall()
                 participantAdd_txhash_T = list(zip(*participantAdd_txhash))
 
-                if len(participantAdd_txhash) != 0 and transaction_data['txid'] in list(participantAdd_txhash_T[1]):
+                if len(participantAdd_txhash) != 0 and transaction_data['txid'] in participantAdd_txhash_T[1]:
                     logger.warning(f"Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
                     pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
                     return 0

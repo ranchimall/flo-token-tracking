@@ -8,7 +8,7 @@ idna==2.10
 pycparser==2.20
 python-dateutil==2.8.1
 python-engineio==3.14.2
-python-socketio==4.6.1
+websockets==12.0
 requests==2.25.0
 six==1.16.0
 SQLAlchemy==1.4.18

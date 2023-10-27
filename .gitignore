@@ -10,7 +10,8 @@ config.ini
 config.py
 *.log
 py3/
-py3.9.0
+py3.9.0/
+py3.9/
 __pycache__/
 *.pyc
 .vscode/

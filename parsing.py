@@ -4,6 +4,7 @@ import arrow
 import pyflo
 import logging
 import json
+from decimal import Decimal
 
 """ 
 Find make lists of #, *, @ words 
@@ -148,6 +149,38 @@ def extract_substring_between(test_str, sub1, sub2):
     
     # return result
     return res
+
+
+def perform_decimal_operation(operation, *args):
+    # Convert all arguments to Decimal type
+    decimal_args = [Decimal(f"{arg}") for arg in args]
+    
+    # Perform the specified operation
+    if operation == 'addition':
+        result = sum(decimal_args)
+    elif operation == 'subtraction':
+        result = decimal_args[0] - sum(decimal_args[1:])
+    elif operation == 'multiplication':
+        result = 1
+        for arg in decimal_args:
+            result *= arg
+    elif operation == 'division':
+        if len(decimal_args) < 2:
+            raise ValueError("Division operation requires at least 2 arguments")
+        result = decimal_args[0] / decimal_args[1]
+        for arg in decimal_args[2:]:
+            result /= arg
+    else:
+        raise ValueError("Invalid operation")
+    
+    # Convert the result back to float and return
+    return float(result)
+
+# Example usage of perform_decimal_operation
+# result1 = perform_operation('addition', 2.5, 3.5, 4.5)
+# result2 = perform_operation('subtraction', 10.0, 2.0, 1.3)
+# result3 = perform_operation('multiplication', 1.5, 2.0, 3.0)
+# result4 = perform_operation('division', 20.0, 4.0, 2.0)
 
 # StateF functions 
 def isStateF(text):
@@ -724,7 +757,8 @@ def extractAmount_rule_new(text):
         extracted_amount = float(amount_tuple_list[0])
         extracted_base_unit = amount_tuple_list[1]
         if extracted_base_unit in base_units.keys():
-            extracted_amount = float(extracted_amount) * base_units[extracted_base_unit]
+            # extracted_amount = float(extracted_amount) * base_units[extracted_base_unit]
+            extracted_amount = perform_decimal_operation( 'multiplication', extracted_amount, base_units[extracted_base_unit])
         return extracted_amount
 
 def extractAmount_rule_new1(text, split_word=None, split_direction=None):
@@ -747,7 +781,8 @@ def extractAmount_rule_new1(text, split_word=None, split_direction=None):
         extracted_amount = float(amount_tuple_list[0])
         extracted_base_unit = amount_tuple_list[1]
         if extracted_base_unit in base_units.keys():
-            extracted_amount = float(extracted_amount) * base_units[extracted_base_unit]
+            # extracted_amount = float(extracted_amount) * base_units[extracted_base_unit]
+            extracted_amount = ('multiplication', extracted_amount, base_units[extracted_base_unit])
         return extracted_amount
 
 
@@ -1127,7 +1162,8 @@ def parse_flodata(text, blockinfo, net):
                                 if item <= 0:
                                     return outputreturn('noise')
                                 payeeAddress_split_dictionary[colon_split[idx-1]] = item
-                                split_total += item
+                                #split_total += item
+                                split_total = perform_decimal_operation('addition', split_total, item)
                             except:
                                 return outputreturn('noise')
                             

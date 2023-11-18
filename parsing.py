@@ -1277,6 +1277,7 @@ def parse_flodata(text, blockinfo, net):
                 assert float(contract_conditions['price'])>0
                 contract_conditions['oracle_address'] = find_original_case_regex(contract_conditions['oracle_address'], clean_text) # making sure the Flo Address is in its original case
                 assert check_flo_address(contract_conditions['oracle_address'], is_testnet)
+                assert contract_conditions['oracle_address'] != contract_address
             else:
                 assert contract_conditions['priceType'] == 'statef'
                 contract_conditions['oracle_address'] = False

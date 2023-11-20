@@ -12,6 +12,7 @@ from sqlalchemy.orm import sessionmaker
 import time 
 import arrow 
 import parsing 
+from parsing import perform_decimal_operation
 import re 
 from datetime import datetime 
 from ast import literal_eval 
@@ -550,7 +551,7 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
         if receiverAddress_details is None:
             addressBalance = tokenAmount
         else:
-            addressBalance =  receiverAddress_details.addressBalance + tokenAmount
+            addressBalance =  perform_decimal_operation('addition', receiverAddress_details.addressBalance, tokenAmount)
             receiverAddress_details.addressBalance = None
         session.add(ActiveTable(address=outputAddress, consumedpid='1', transferBalance=tokenAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
@@ -580,7 +581,7 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
                 if checksum >= commentTransferAmount:
                     break
                 pidlst.append([row.id, row.transferBalance])
-                checksum = checksum + row.transferBalance
+                checksum = perform_decimal_operation('addition', checksum, row.transferBalance)
 
             if checksum == commentTransferAmount:
                 consumedpid_string = ''
@@ -606,12 +607,12 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
                 if receiverAddress_details is None:
                     addressBalance = commentTransferAmount
                 else:
-                    addressBalance = receiverAddress_details.addressBalance + commentTransferAmount
+                    addressBalance = perform_decimal_operation('addition', receiverAddress_details.addressBalance, commentTransferAmount)
                     receiverAddress_details.addressBalance = None
                 session.add(ActiveTable(address=outputAddress, consumedpid=str(piddict), transferBalance=commentTransferAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
                 senderAddress_details = session.query(ActiveTable).filter_by(address=inputAddress).order_by(ActiveTable.id.desc()).first()
-                senderAddress_details.addressBalance = senderAddress_details.addressBalance - commentTransferAmount 
+                senderAddress_details.addressBalance = perform_decimal_operation('subtraction', senderAddress_details.addressBalance, commentTransferAmount )
 
                 # Migration
                 # shift pid of used utxos from active to consumed
@@ -647,12 +648,12 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
                         consumedpid_string = consumedpid_string + '{},'.format(piditem[0])
                     else:
                         session.add(TransferLogs(sourceFloAddress=inputAddress, destFloAddress=outputAddress,
-                                                transferAmount=piditem[1] - (checksum - commentTransferAmount),
+                                                transferAmount=perform_decimal_operation('subtraction', piditem[1], perform_decimal_operation('subtraction', checksum, commentTransferAmount)),
                                                 sourceId=piditem[0],
                                                 destinationId=lastid + 1,
                                                 blockNumber=blockinfo['height'], time=blockinfo['time'],
                                                 transactionHash=transaction_data['txid']))
-                        entry[0].transferBalance = checksum - commentTransferAmount
+                        entry[0].transferBalance = perform_decimal_operation('subtraction', checksum, commentTransferAmount)
 
                 if len(consumedpid_string) > 1:
                     consumedpid_string = consumedpid_string[:-1]
@@ -662,12 +663,12 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
                 if receiverAddress_details is None:
                     addressBalance = commentTransferAmount
                 else:
-                    addressBalance =  receiverAddress_details.addressBalance + commentTransferAmount
+                    addressBalance =  perform_decimal_operation('addition', receiverAddress_details.addressBalance, commentTransferAmount)
                     receiverAddress_details.addressBalance = None
                 session.add(ActiveTable(address=outputAddress, parentid=pidlst[-1][0], consumedpid=str(piddict), transferBalance=commentTransferAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
                 senderAddress_details = session.query(ActiveTable).filter_by(address=inputAddress).order_by(ActiveTable.id.desc()).first()
-                senderAddress_details.addressBalance = senderAddress_details.addressBalance - commentTransferAmount
+                senderAddress_details.addressBalance = perform_decimal_operation('subtraction', senderAddress_details.addressBalance, commentTransferAmount)
 
                 # Migration 
                 # shift pid of used utxos from active to consumed
@@ -704,7 +705,8 @@ def trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_da
         tokenIdentification = contractStructure['tokenIdentification']
 
         for floaddress in payeeAddress.keys():
-            transferAmount = tokenAmount_sum * (payeeAddress[floaddress]/100)
+            # transferAmount = tokenAmount_sum * (payeeAddress[floaddress]/100)
+            transferAmount = perform_decimal_operation('multiplication', tokenAmount_sum, perform_decimal_operation('division', payeeAddress[floaddress], 100))
             returnval = transferToken(tokenIdentification, transferAmount, contract_address, floaddress, transaction_data=transaction_data, blockinfo = blockinfo, parsed_data = parsed_data)
             if returnval == 0:
                 logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
@@ -1194,7 +1196,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
                             pushData_SSEapi(rejectComment)
                             return 0
-                        elif ((float(amountDeposited) + float(parsed_data['tokenAmount'])) > maximumsubscriptionamount):
+                        elif (perform_decimal_operation('addition', float(amountDeposited), float(parsed_data['tokenAmount'])) > maximumsubscriptionamount):
                             if 'contractAmount' in contractStructure:
                                 rejectComment = f"Transaction {transaction_data['txid']} rejected as the contractAmount surpasses the maximum subscription amount, {contractStructure['maximumsubscriptionamount']} {contractStructure['tokenIdentification'].upper()}, for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}"
                                 logger.info(rejectComment)
@@ -1258,11 +1260,11 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     return 0
                             elif partialTransferCounter == 1:
                                 # Transfer only part of the tokens users specified, till the time it reaches maximumamount
-                                returnval = transferToken(parsed_data['tokenIdentification'], maximumsubscriptionamount - amountDeposited, inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
+                                returnval = transferToken(parsed_data['tokenIdentification'], perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited), inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
                                 if returnval != 0:
                                     # Store participant details in the smart contract's db
                                     session.add(ContractParticipants(participantAddress=inputadd,
-                                                                        tokenAmount=maximumsubscriptionamount - amountDeposited,
+                                                                        tokenAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited),
                                                                         userChoice=parsed_data['userChoice'],
                                                                         transactionHash=transaction_data['txid'],
                                                                         blockNumber=transaction_data['blockheight'],
@@ -1271,12 +1273,12 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     session.close()
 
                                     # Store transfer as part of ContractTransactionHistory
-                                    add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=maximumsubscriptionamount - amountDeposited, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+                                    add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited), blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
 
                                     # Store a mapping of participant address -> Contract participated in
                                     session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
                                     session.add(ContractAddressMapping(address=inputadd, addressType='participant',
-                                                                        tokenAmount=maximumsubscriptionamount - amountDeposited,
+                                                                        tokenAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited),
                                                                         contractName=parsed_data['contractName'],
                                                                         contractAddress=outputlist[0],
                                                                         transactionHash=transaction_data['txid'],
@@ -1303,7 +1305,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         if partialTransferCounter == 0:
                             transferAmount = parsed_data['tokenAmount']
                         elif partialTransferCounter == 1:
-                            transferAmount = maximumsubscriptionamount - amountDeposited
+                            transferAmount = perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited)
                         
                         # Check if the tokenAmount being transferred exists in the address & do the token transfer
                         returnval = transferToken(parsed_data['tokenIdentification'], transferAmount, inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo = blockinfo)
@@ -1373,7 +1375,8 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             
                             swapPrice = fetchDynamicSwapPrice(contractStructure, blockinfo)
 
-                        swapAmount = float(parsed_data['tokenAmount'])/swapPrice
+                        # swapAmount = float(parsed_data['tokenAmount'])/swapPrice
+                        swapAmount = perform_decimal_operation('division', parsed_data['tokenAmount'], swapPrice)
 
                         # Check if the swap amount is available in the deposits of the selling token 
                         # if yes do the transfers, otherwise reject the transaction 
@@ -1412,7 +1415,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             for a_deposit in available_deposits:
                                 if a_deposit.depositBalance > remaining_amount:
                                     # accepting token transfer from the contract to depositor's address 
-                                    returnval = transferToken(contractStructure['accepting_token'], remaining_amount * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiply', remaining_amount, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
                                     if returnval == 0:
                                         logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
                                         return 0
@@ -1426,7 +1429,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
 
                                     contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
-                                                                            depositAmount= 0 - remaining_amount,
+                                                                            depositAmount= perform_decimal_operation('subtraction', 0, remaining_amount),
                                                                             status='deposit-honor',
                                                                             transactionHash= a_deposit.transactionHash,
                                                                             blockNumber= blockinfo['height'],
@@ -1434,7 +1437,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     
                                     # if the total is consumsed then the following entry won't take place 
                                     contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
-                                                                            depositBalance= a_deposit.depositBalance - remaining_amount,
+                                                                            depositBalance= perform_decimal_operation('subtraction', a_deposit.depositBalance, remaining_amount),
                                                                             expiryTime = a_deposit.expiryTime,
                                                                             unix_expiryTime = a_deposit.unix_expiryTime,
                                                                             status='active',
@@ -1445,13 +1448,13 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     contract_session.add(ConsumedInfo(  id_deposittable= a_deposit.id,
                                                                         transactionHash= a_deposit.transactionHash,
                                                                         blockNumber= blockinfo['height']))
-                                    remaining_amount = remaining_amount - a_deposit.depositBalance
+                                    remaining_amount = perform_decimal_operation('subtraction', remaining_amount, a_deposit.depositBalance)
                                     remaining_amount = 0 
                                     break
                                 
                                 elif a_deposit.depositBalance <= remaining_amount:
                                     # accepting token transfer from the contract to depositor's address 
-                                    returnval = transferToken(contractStructure['accepting_token'], a_deposit.depositBalance * swapPrice, contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiplication', a_deposit.depositBalance, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
                                     if returnval == 0:
                                         logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
                                         return 0
@@ -1465,7 +1468,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
                                     
                                     contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
-                                                                            depositAmount= 0 - a_deposit.depositBalance,
+                                                                            depositAmount= perform_decimal_operation('subtraction', 0, a_deposit.depositBalance),
                                                                             status='deposit-honor',
                                                                             transactionHash= a_deposit.transactionHash,
                                                                             blockNumber= blockinfo['height'],
@@ -1483,7 +1486,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                                     contract_session.add(ConsumedInfo(  id_deposittable= a_deposit.id,
                                                                         transactionHash= a_deposit.transactionHash,
                                                                         blockNumber= blockinfo['height']))
-                                    remaining_amount = remaining_amount - a_deposit.depositBalance
+                                    remaining_amount = perform_decimal_operation('subtraction', remaining_amount, a_deposit.depositBalance)
 
                                     systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
                                     systemdb_entry = systemdb_session.query(TimeActions.activity, TimeActions.contractType, TimeActions.tokens_db, TimeActions.parsed_data).filter(TimeActions.transactionHash == a_deposit.transactionHash).first()
@@ -2054,7 +2057,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                     tokenIdentification = connection.execute('SELECT value FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
 
                     for winner in contractWinners:
-                        winnerAmount = "%.8f" % ((winner[2] / winnerSum) * tokenSum)
+                        winnerAmount = "%.8f" % perform_decimal_operation('multiplication', perform_decimal_operation('division', winner[2], winnerSum), tokenSum)
                         returnval = transferToken(tokenIdentification, winnerAmount, outputlist[0], winner[1], transaction_data, parsed_data, blockinfo = blockinfo)
                         if returnval == 0:
                             logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")

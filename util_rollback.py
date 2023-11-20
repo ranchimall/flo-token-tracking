@@ -7,6 +7,7 @@ import os
 import json 
 import logging 
 import sys 
+from parsing import perform_decimal_operation
 
 
 apppath = os.path.dirname(os.path.realpath(__file__)) 
@@ -113,7 +114,7 @@ def getDatabase_from_parsedFloData(parsed_flodata, inputAddress, outputAddress):
 def calc_pid_amount(transferBalance, consumedpid):
     consumedpid_sum = 0
     for key in list(consumedpid.keys()):
-        consumedpid_sum = consumedpid_sum + float(consumedpid[key])
+        consumedpid_sum = perform_decimal_operation('addition', consumedpid_sum, float(consumedpid[key]))
     return transferBalance - consumedpid_sum
 
 
@@ -132,8 +133,8 @@ def rollback_address_balance_processing(db_session, senderAddress, receiverAddre
     # Calculation phase 
     current_receiverBalance = find_addressBalance_from_floAddress(db_session, receiverAddress)
     current_senderBalance = find_addressBalance_from_floAddress(db_session ,senderAddress)
-    new_receiverBalance = current_receiverBalance - transferBalance
-    new_senderBalance = current_senderBalance + transferBalance
+    new_receiverBalance = perform_decimal_operation('subtraction', current_receiverBalance, transferBalance)
+    new_senderBalance = perform_decimal_operation('addition', current_senderBalance, transferBalance)
 
     # Insertion phase 
     # if new receiver balance is 0, then only insert sender address balance 

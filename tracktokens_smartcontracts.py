@@ -20,6 +20,7 @@ from models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLo
 from statef_processing import process_stateF 
 import asyncio
 import websockets
+from decimal import Decimal
 import pdb
 
 
@@ -348,7 +349,12 @@ def convert_datetime_to_arrowobject_regex(expiryTime):
 def is_a_contract_address(floAddress):
     # check contract address mapping db if the address is present, and return True or False based on that 
     system_db = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
-    contract_number = system_db.query(func.sum(ContractAddressMapping.contractAddress)).filter(ContractAddressMapping.contractAddress == floAddress).all()[0][0]
+
+    # contract_number = system_db.query(func.sum(ContractAddressMapping.contractAddress)).filter(ContractAddressMapping.contractAddress == floAddress).all()[0][0]
+
+    query_data = system_db.query(ContractAddressMapping.contractAddress).filter(ContractAddressMapping.contractAddress == floAddress).all()
+    contract_number = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+
     if contract_number is None: 
         return False
     else:
@@ -561,7 +567,11 @@ def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress,
         return 1
 
     else:
-        availableTokens = session.query(func.sum(ActiveTable.transferBalance)).filter_by(address=inputAddress).all()[0][0]
+        # availableTokens = session.query(func.sum(ActiveTable.transferBalance)).filter_by(address=inputAddress).all()[0][0]
+
+        query_data = session.query(ActiveTable.transferBalance).filter_by(address=inputAddress).all()
+        availableTokens = float(sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data))
+
         commentTransferAmount = float(tokenAmount)
         if availableTokens is None:
             logger.info(f"The sender address {inputAddress} doesn't own any {tokenIdentification.upper()} tokens")
@@ -705,7 +715,6 @@ def trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_da
         tokenIdentification = contractStructure['tokenIdentification']
 
         for floaddress in payeeAddress.keys():
-            # transferAmount = tokenAmount_sum * (payeeAddress[floaddress]/100)
             transferAmount = perform_decimal_operation('multiplication', tokenAmount_sum, perform_decimal_operation('division', payeeAddress[floaddress], 100))
             returnval = transferToken(tokenIdentification, transferAmount, contract_address, floaddress, transaction_data=transaction_data, blockinfo = blockinfo, parsed_data = parsed_data)
             if returnval == 0:
@@ -721,7 +730,10 @@ def trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_da
 
 def process_minimum_subscriptionamount(contractStructure, connection, blockinfo, transaction_data, parsed_data):
     minimumsubscriptionamount = float(contractStructure['minimumsubscriptionamount'])
-    tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+
+    rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+    tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+
     if tokenAmount_sum < minimumsubscriptionamount:
         # Initialize payback to contract participants
         contractParticipants = connection.execute('SELECT participantAddress, tokenAmount, transactionHash FROM contractparticipants').fetchall()
@@ -746,10 +758,12 @@ def process_minimum_subscriptionamount(contractStructure, connection, blockinfo,
 
 def process_maximum_subscriptionamount(contractStructure, connection, status, blockinfo, transaction_data, parsed_data):
     maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
-    tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+    rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+    tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
     if tokenAmount_sum >= maximumsubscriptionamount:
         # Trigger the contract
         if status == 'close':
+            pdb.set_trace()
             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transaction_subType='maximumsubscriptionamount')
             if not success_returnval:
                 return 0
@@ -831,7 +845,8 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                     # maximumsubscription check, if reached then expire the contract 
                     if 'maximumsubscriptionamount' in contractStructure:
                         maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
-                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Expire the contract
                             close_expire_contract(contractStructure, 'expired', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], None, query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
@@ -850,9 +865,11 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                     # maximumsubscription check, if reached then trigger the contract
                     if 'maximumsubscriptionamount' in contractStructure:
                         maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
-                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Trigger the contract
+                            pdb.set_trace()
                             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
                             if not success_returnval:
                                 return 0
@@ -867,7 +884,10 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                                 return
                         
                         # Trigger the contract
-                        tokenAmount_sum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        # Sum up using Decimal
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+
                         success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='expiryTime')
                         if not success_returnval:
                             return 0
@@ -1185,8 +1205,13 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         # now parse the expiry time in python
                         maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
                         session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
-                        amountDeposited = session.query(func.sum(ContractParticipants.tokenAmount)).all()[0][0]
+                        # amountDeposited = session.query(func.sum(ContractParticipants.tokenAmount)).all()[0][0]
+                        
+                        query_data = session.query(ContractParticipants.tokenAmount).all()
+                        amountDeposited = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+
                         session.close()
+
                         if amountDeposited is None:
                             amountDeposited = 0
 
@@ -1386,7 +1411,13 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
                         # todo - what is the role of the next line? cleanup if not useful
                         available_deposits = active_contract_deposits[:]
-                        available_deposit_sum = contract_session.query(func.sum(ContractDeposits.depositBalance)).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
+
+                        # available_deposit_sum = contract_session.query(func.sum(ContractDeposits.depositBalance)).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
+
+                        query_data = contract_session.query(ContractDeposits.depositBalance).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
+
+                        available_deposit_sum = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+
                         if available_deposit_sum[0][0] is None:
                             available_deposit_sum = 0
                         else:
@@ -2000,7 +2031,10 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                     # if it has not been reached, close the contract and return money
                     minimumsubscriptionamount = float(contractStructure['minimumsubscriptionamount'])
                     session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
-                    amountDeposited = session.query(func.sum(ContractParticipants.tokenAmount)).all()[0][0]
+                    
+                    # amountDeposited = session.query(func.sum(ContractParticipants.tokenAmount)).all()[0][0]
+                    query_data = session.query(ContractParticipants.tokenAmount).all()
+                    amountDeposited = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
                     session.close()
 
                     if amountDeposited is None:
@@ -2050,10 +2084,15 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
 
                 # Trigger the contract
                 connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
-                tokenSum = connection.execute('SELECT IFNULL(sum(tokenAmount), 0) FROM contractparticipants').fetchall()[0][0]
+                rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                tokenSum = float(sum(Decimal(f"{row[0]}") for row in rows))
+                
                 if tokenSum > 0:
                     contractWinners = connection.execute('SELECT * FROM contractparticipants WHERE userChoice="{}"'.format(parsed_data['triggerCondition'])).fetchall()
-                    winnerSum = connection.execute('SELECT sum(tokenAmount) FROM contractparticipants WHERE userChoice="{}"'.format(parsed_data['triggerCondition'])).fetchall()[0][0]
+
+                    rows = connection.execute('SELECT tokenAmount FROM contractparticipants WHERE userChoice="{}"'.format(parsed_data['triggerCondition'])).fetchall()
+                    winnerSum = float(sum(Decimal(f"{row[0]}") for row in rows))
+
                     tokenIdentification = connection.execute('SELECT value FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
 
                     for winner in contractWinners:

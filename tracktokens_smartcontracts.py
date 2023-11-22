@@ -763,7 +763,6 @@ def process_maximum_subscriptionamount(contractStructure, connection, status, bl
     if tokenAmount_sum >= maximumsubscriptionamount:
         # Trigger the contract
         if status == 'close':
-            pdb.set_trace()
             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transaction_subType='maximumsubscriptionamount')
             if not success_returnval:
                 return 0
@@ -784,13 +783,11 @@ def check_contract_status(contractName, contractAddress):
 def close_expire_contract(contractStructure, contractStatus, transactionHash, blockNumber, blockHash, incorporationDate, expiryDate, closeDate, trigger_time, trigger_activity, contractName, contractAddress, contractType, tokens_db, parsed_data, blockHeight):
     connection = create_database_connection('system_dbs', {'db_name':'system'})
     connection.execute('INSERT INTO activecontracts VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (None, contractStructure['contractName'], contractStructure['contractAddress'], contractStatus, contractStructure['tokenIdentification'], contractStructure['contractType'], transactionHash, blockNumber, blockHash, incorporationDate, expiryDate, closeDate))
-    
     connection.execute('INSERT INTO time_actions VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)', (None, trigger_time, trigger_activity, contractStatus, contractName, contractAddress, contractType, tokens_db, parsed_data, transactionHash, blockHeight))
     connection.close()
 
 
 def return_active_contracts(session):
-
     active_contracts = session.execute('''SELECT t1.* FROM time_actions t1 JOIN ( SELECT contractName, contractAddress, MAX(id) AS max_id FROM time_actions GROUP BY contractName, contractAddress ) t2 ON t1.contractName = t2.contractName AND t1.contractAddress = t2.contractAddress AND t1.id = t2.max_id WHERE t1.status = 'active' AND t1.activity = 'contract-time-trigger' ''').all()
     return active_contracts
 
@@ -869,7 +866,6 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                         tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
                         if tokenAmount_sum >= maximumsubscriptionamount:
                             # Trigger the contract
-                            pdb.set_trace()
                             success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
                             if not success_returnval:
                                 return 0
@@ -887,7 +883,6 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                         rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
                         # Sum up using Decimal
                         tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
-
                         success_returnval = trigger_internal_contract(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='expiryTime')
                         if not success_returnval:
                             return 0

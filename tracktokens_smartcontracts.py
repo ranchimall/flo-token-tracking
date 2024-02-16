@@ -27,17 +27,18 @@ def newMultiRequest(apicall):
     while True:
         try:
             response = requests.get(f"{current_server}api/v1/{apicall}", verify=API_VERIFY)
-        except:
+            logger.info(f"Called the API {current_server}api/v1/{apicall}")
+            if response.status_code == 200:
+                return response.json()  # Use the built-in .json() method
+            else:
+                logger.info(f"Response status code - \n{response.status_code}")
+                logger.info(f"Response content -\n{response.content}")
+                raise Exception("Non-200 status code")
+        except Exception as e:
+            logger.info(f"newMultiRequest() exception: {e}. Switching server...")
             current_server = switchNeturl(current_server)
             logger.info(f"newMultiRequest() switched to {current_server}")
             time.sleep(2)
-        else:
-            if response.status_code == 200:
-                return json.loads(response.content)
-            else:
-                current_server = switchNeturl(current_server) 
-                logger.info(f"newMultiRequest() switched to {current_server}")
-                time.sleep(2)
 
 
 def pushData_SSEapi(message):
@@ -446,9 +447,13 @@ def processBlock(blockindex=None, blockhash=None):
     if blockindex is not None and blockhash is None:
         logger.info(f'Processing block {blockindex}') 
         # Get block details 
-        response = newMultiRequest(f"block-index/{blockindex}") 
-        blockhash = response['blockHash'] 
+        while blockhash is None or blockhash == '':
+            response = newMultiRequest(f"block-index/{blockindex}") 
+            blockhash = response['blockHash'] 
 
+    if blockhash is None or blockhash=='':
+        # todo: remove debugger lines
+        pdb.set_trace()
     blockinfo = newMultiRequest(f"block/{blockhash}")
     
     # Check and perform operations which do not require blockchain intervention
@@ -462,9 +467,6 @@ def processBlock(blockindex=None, blockhash=None):
 
     for transaction_data in blockinfo["txs"]:
         transaction = transaction_data["txid"]
-
-        if transaction in ['f09b63a9f9bc5412c2e339196994441f99cf46e6fa98a0656cba62d7f2cad9c8', '452f964d8923515c9f58b45a9bfdd1ac288c38f740149222b83989958e764d1e']:
-            pass
         
         try:
             text = transaction_data["floData"]
@@ -2306,11 +2308,9 @@ def scanBlockchain():
     # Now we connect to flosight's websocket API to get information about the latest blocks
 
 def switchNeturl(currentneturl):
+    # Use modulo operation to simplify the logic
     neturlindex = serverlist.index(currentneturl)
-    if neturlindex+1 >= len(serverlist):
-        return serverlist[neturlindex+1  - len(serverlist)]
-    else:
-        return serverlist[neturlindex+1]
+    return serverlist[(neturlindex + 1) % len(serverlist)]
 
 
 def reconnectWebsocket(socket_variable):
@@ -2355,6 +2355,15 @@ async def connect_to_websocket(uri):
                     logger.info(f"Received: {response}")
                     response = json.loads(response)
                     if 'height' in response['data'].keys():
+                        if response['data']['height'] is None or response['data']['height']=='':
+                            print('blockheight is none')
+                            # todo: remove these debugger lines
+                            pdb.set_trace()
+                        if response['data']['hash'] is None or response['data']['hash']=='':
+                            print('blockhash is none')
+                            # todo: remove these debugger lines
+                            pdb.set_trace()
+                            # If this is the issue need to proceed forward only once blockbook has consolitated 
                         processBlock(blockindex=response['data']['height'], blockhash=response['data']['hash'])
         
         except Exception as e:

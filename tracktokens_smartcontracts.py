@@ -1412,8 +1412,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         query_data = contract_session.query(ContractDeposits.depositBalance).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
 
                         available_deposit_sum = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
-
-                        if available_deposit_sum[0][0] is None:
+                        if available_deposit_sum==0 or available_deposit_sum[0][0] is None:
                             available_deposit_sum = 0
                         else:
                             available_deposit_sum = float(available_deposit_sum[0][0])

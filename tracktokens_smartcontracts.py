@@ -352,11 +352,10 @@ def is_a_contract_address(floAddress):
     system_db = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
 
     # contract_number = system_db.query(func.sum(ContractAddressMapping.contractAddress)).filter(ContractAddressMapping.contractAddress == floAddress).all()[0][0]
-
     query_data = system_db.query(ContractAddressMapping.contractAddress).filter(ContractAddressMapping.contractAddress == floAddress).all()
     contract_number = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
 
-    if contract_number is None: 
+    if contract_number is None or contract_number==0: 
         return False
     else:
         return True
@@ -456,11 +455,11 @@ def processBlock(blockindex=None, blockhash=None):
         # Get block details 
         while blockhash is None or blockhash == '':
             response = newMultiRequest(f"block-index/{blockindex}") 
-            blockhash = response['blockHash'] 
+            try:            
+                blockhash = response['blockHash'] 
+            except:
+                logger.info(f"API call block-index/{blockindex} failed to give proper response. Retrying.")
 
-    if blockhash is None or blockhash=='':
-        # todo: remove debugger lines
-        pdb.set_trace()
     blockinfo = newMultiRequest(f"block/{blockhash}")
     
     # Check and perform operations which do not require blockchain intervention
@@ -2394,11 +2393,9 @@ async def connect_to_websocket(uri):
                         if response['data']['height'] is None or response['data']['height']=='':
                             print('blockheight is none')
                             # todo: remove these debugger lines
-                            pdb.set_trace()
                         if response['data']['hash'] is None or response['data']['hash']=='':
                             print('blockhash is none')
                             # todo: remove these debugger lines
-                            pdb.set_trace()
                             # If this is the issue need to proceed forward only once blockbook has consolitated 
                         processBlock(blockindex=response['data']['height'], blockhash=response['data']['hash'])
         

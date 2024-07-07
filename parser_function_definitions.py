@@ -103,14 +103,14 @@ def truefalse_rule2(rawstring, permitted_list, denied_list):
             foundDenied = word
             break
     
-    if (foundPermitted in not None) and (foundDenied is None):
+    if (foundPermitted is not None) and (foundDenied is None):
         return True
     else:
         return False
 
 
 def selectCateogry(rawstring, wordlist, category1, category2):
-
+    None
 
 """
 CLASSIFY RULES 
@@ -159,7 +159,7 @@ def apply_rule1(*argv):
     a = argv[0](*argv[1:])
     if a is False:
         return "noise"
-    elif a if True:
+    elif a is True:
         return a
 
 # If any of the parser rule returns a value, then queue it for further processing, otherwise send noise to the output engine 

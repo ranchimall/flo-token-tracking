@@ -2483,35 +2483,58 @@ IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]
 IGNORE_TRANSACTION_LIST = config['DEFAULT']['IGNORE_TRANSACTION_LIST'].split(',')
 
 
-# Delete database and smartcontract directory if reset is set to 1
-if args.reset == 1:
-    logger.info("Resetting the database. ")
-    dirpath = os.path.join(config['DEFAULT']['DATA_PATH'], 'tokens')
-    if os.path.exists(dirpath):
-        shutil.rmtree(dirpath)
-    os.mkdir(dirpath)
-    dirpath = os.path.join(config['DEFAULT']['DATA_PATH'], 'smartContracts')
-    if os.path.exists(dirpath):
-        shutil.rmtree(dirpath)
-    os.mkdir(dirpath)
-    dirpath = os.path.join(config['DEFAULT']['DATA_PATH'], 'system.db')
-    if os.path.exists(dirpath):
-        os.remove(dirpath)
-    dirpath = os.path.join(config['DEFAULT']['DATA_PATH'], 'latestCache.db')
-    if os.path.exists(dirpath):
-        os.remove(dirpath)
+def create_dir_if_not_exist(dir_path, reset = False):
+    if os.path.exists(dir_path):
+        if reset: 
+            shutil.rmtree(dir_path)
+            os.mkdir(dir_path)
+    else:
+        os.mkdir(dir_path) 
 
-    # Read start block no
-    startblock = int(config['DEFAULT']['START_BLOCK'])
+def init_system_db(startblock):
+    # Initialize system.db
     session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
     session.add(SystemData(attribute='lastblockscanned', value=startblock - 1))
     session.commit()
     session.close()
 
+def init_lastestcache_db():
     # Initialize latest cache DB
     session = create_database_session_orm('system_dbs', {'db_name': "latestCache"}, LatestCacheBase)
     session.commit()
     session.close()
+
+def init_storage_if_not_exist(reset = False):
+    
+    token_dir_path = os.path.join(config['DEFAULT']['DATA_PATH'], 'tokens')
+    create_dir_if_not_exist(token_dir_path, reset)
+
+    smart_contract_dir_path = os.path.join(config['DEFAULT']['DATA_PATH'], 'smartContracts')
+    create_dir_if_not_exist(smart_contract_dir_path, reset)
+    
+    system_db_path = os.path.join(config['DEFAULT']['DATA_PATH'], 'system.db')
+    if os.path.exists(system_db_path):
+        if reset: 
+            os.remove(system_db_path)
+            init_system_db(int(config['DEFAULT']['START_BLOCK']))
+    else:
+        init_system_db(int(config['DEFAULT']['START_BLOCK']))
+            
+    
+    latestCache_db_path = os.path.join(config['DEFAULT']['DATA_PATH'], 'latestCache.db')
+    if os.path.exists(latestCache_db_path):
+        if reset: 
+            os.remove(latestCache_db_path)
+            init_lastestcache_db()
+    else:
+        init_lastestcache_db()
+
+# Delete database and smartcontract directory if reset is set to 1
+if args.reset == 1:
+    logger.info("Resetting the database. ")
+    init_storage_if_not_exist(reset=True)
+else:
+    init_storage_if_not_exist()
 
 
 # Determine API source for block and transaction information

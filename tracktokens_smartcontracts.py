@@ -22,6 +22,7 @@ import asyncio
 import websockets
 from decimal import Decimal
 import pdb
+from util_rollback import rollback_to_block
 
 
 def newMultiRequest(apicall):
@@ -954,6 +955,40 @@ def checkLocal_expiry_trigger_deposit(blockinfo):
                     updateLatestTransaction(transaction_data, parsed_data, f"{query.contractName}-{query.contractAddress}")
 
 
+def check_reorg():
+    connection = create_database_connection('system_dbs')
+    blockbook_api_url = 'https://blockbook.ranchimall.net/'
+    BACK_TRACK_BLOCKS = 1000
+
+    # find latest block number in local database
+    latest_block = list(connection.execute("SELECT max(blockNumber) from latestBlocks").fetchone())[0]
+    block_number = latest_block
+
+    while block_number > 0:
+        # get the block hash
+        block_hash = list(connection.execute(f"SELECT blockHash from latestBlocks WHERE blockNumber = {block_number}").fetchone())[0] 
+
+        # Check if the block is in blockbook (i.e, not dropped in reorg)
+        response = requests.get(f'{blockbook_api_url}api/block/{block_number}', verify=API_VERIFY)
+        if response.status_code == 200:
+            response = response.json()
+            if response['hash'] == block_hash: # local blockhash matches with blockbook hash
+                break
+            else: # check for older blocks to trace where reorg has happened
+                block_number -= BACK_TRACK_BLOCKS
+                continue
+        else:
+            logger.info('Response from the Blockbook API failed')
+            sys.exit(0)
+
+    connection.close()
+
+    # rollback if needed
+    if block_number != latest_block:
+        rollback_to_block(block_number)
+    
+    return block_number
+    
 def extract_contractStructure(contractName, contractAddress):
     connection = create_database_connection('smart_contract', {'contract_name':f"{contractName}", 'contract_address':f"{contractAddress}"})
     attributevaluepair = connection.execute("SELECT attribute, value FROM contractstructure WHERE attribute != 'flodata'").fetchall()

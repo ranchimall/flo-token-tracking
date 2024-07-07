@@ -465,8 +465,12 @@ def initiate_rollback_process():
     systemdb_session.commit()
     systemdb_session.close()
 
+def rollback_to_block(block_number):
+    global rollback_block
+    rollback_block = block_number
+    start_rollback_process()
 
-if __name__ == "__main__":
+def start_rollback_process():
     systemdb_session = create_database_session_orm('system_dbs', {'db_name': 'system'}, SystemBase)
     lastblockscanned_query = systemdb_session.query(SystemData).filter(SystemData.attribute=='lastblockscanned').first()
     if(rollback_block > int(lastblockscanned_query.value)):
@@ -474,3 +478,6 @@ if __name__ == "__main__":
         sys.exit(0)
     else:
         initiate_rollback_process()
+
+if __name__ == "__main__":
+    start_rollback_process()

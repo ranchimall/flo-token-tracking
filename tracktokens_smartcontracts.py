@@ -553,16 +553,15 @@ def processBlock(blockindex=None, blockhash=None):
         blockinfo['txs'] = tempinfo
         updateLatestBlock(blockinfo)
     
-    while True:
-        try:
-            session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
-            entry = session.query(SystemData).filter(SystemData.attribute == 'lastblockscanned').all()[0]
-            entry.value = str(blockinfo['height'])
-            session.commit()
-            session.close()
-        except:
-            logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
-            time.sleep(DB_RETRY_TIMEOUT)
+    try:
+        session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+        entry = session.query(SystemData).filter(SystemData.attribute == 'lastblockscanned').all()[0]
+        entry.value = str(blockinfo['height'])
+        session.commit()
+        session.close()
+    except:
+        logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+        time.sleep(DB_RETRY_TIMEOUT)
 
 
 def updateLatestTransaction(transactionData, parsed_data, db_reference, transactionType=None ):

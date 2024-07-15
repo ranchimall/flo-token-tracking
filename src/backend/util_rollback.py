@@ -349,29 +349,6 @@ def system_database_deletions(blockNumber):
     systemdb_session.close()
 
 
-# Take input from user reg how many blocks to go back in the blockchain
-parser = argparse.ArgumentParser(description='Script tracks RMT using FLO data on the FLO blockchain - https://flo.cash') 
-parser.add_argument('-rb', '--toblocknumer', nargs='?', type=int, help='Rollback the script to the specified block number') 
-parser.add_argument('-r', '--blockcount', nargs='?', type=int, help='Rollback the script to the number of blocks specified') 
-args = parser.parse_args() 
-
-# Get all the transaction and blockdetails from latestCache reg the transactions in the block
-systemdb_session = create_database_session_orm('system_dbs', {'db_name': 'system'}, SystemBase) 
-lastscannedblock = systemdb_session.query(SystemData.value).filter(SystemData.attribute=='lastblockscanned').first() 
-systemdb_session.close() 
-lastscannedblock = int(lastscannedblock.value) 
-if (args.blockcount and args.toblocknumber):
-    print("You can only specify one of the options -b or -c")
-    sys.exit(0)
-elif args.blockcount:
-    rollback_block = lastscannedblock - args.blockcount
-elif args.toblocknumer:
-    rollback_block = args.toblocknumer
-else:
-    print("Please specify the number of blocks to rollback")
-    sys.exit(0)
-
-
 def return_token_contract_set(rollback_block):
     latestcache_session = create_database_session_orm('system_dbs', {'db_name': 'latestCache'}, LatestCacheBase) 
     latestBlocks = latestcache_session.query(LatestBlocks).filter(LatestBlocks.blockNumber > rollback_block).all() 
@@ -480,4 +457,27 @@ def start_rollback_process():
         initiate_rollback_process()
 
 if __name__ == "__main__":
+    # Take input from user reg how many blocks to go back in the blockchain
+    parser = argparse.ArgumentParser(description='Script tracks RMT using FLO data on the FLO blockchain - https://flo.cash') 
+    parser.add_argument('-rb', '--toblocknumer', nargs='?', type=int, help='Rollback the script to the specified block number') 
+    parser.add_argument('-r', '--blockcount', nargs='?', type=int, help='Rollback the script to the number of blocks specified') 
+    args = parser.parse_args() 
+
+    # Get all the transaction and blockdetails from latestCache reg the transactions in the block
+    systemdb_session = create_database_session_orm('system_dbs', {'db_name': 'system'}, SystemBase) 
+    lastscannedblock = systemdb_session.query(SystemData.value).filter(SystemData.attribute=='lastblockscanned').first() 
+    systemdb_session.close() 
+    lastscannedblock = int(lastscannedblock.value) 
+    if (args.blockcount and args.toblocknumber):
+        print("You can only specify one of the options -b or -c")
+        sys.exit(0)
+    elif args.blockcount:
+        rollback_block = lastscannedblock - args.blockcount
+    elif args.toblocknumer:
+        rollback_block = args.toblocknumer
+    else:
+        print("Please specify the number of blocks to rollback")
+        sys.exit(0)
+
+    
     start_rollback_process()

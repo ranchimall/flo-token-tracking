@@ -131,11 +131,11 @@ if (config['DEFAULT']['NET'] != 'mainnet') and (config['DEFAULT']['NET'] != 'tes
 # Specify mainnet and testnet server list for API calls and websocket calls 
 serverlist = None
 if config['DEFAULT']['NET'] == 'mainnet':
-    serverlist = config['DEFAULT']['MAINNET_FLOSIGHT_SERVER_LIST']
+    serverlist = config['DEFAULT']['MAINNET_BLOCKBOOK_SERVER_LIST']
 elif config['DEFAULT']['NET'] == 'testnet':
-    serverlist = config['DEFAULT']['TESTNET_FLOSIGHT_SERVER_LIST']
+    serverlist = config['DEFAULT']['TESTNET_BLOCKBOOK_SERVER_LIST']
 serverlist = serverlist.split(',')
-neturl = config['DEFAULT']['FLOSIGHT_NETURL']
+neturl = config['DEFAULT']['BLOCKBOOK_NETURL']
 tokenapi_sse_url = config['DEFAULT']['TOKENAPI_SSE_URL']
 
 # Delete database and smartcontract directory if reset is set to 1

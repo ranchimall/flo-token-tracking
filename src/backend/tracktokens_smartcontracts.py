@@ -1,5 +1,5 @@
-import argparse 
-import configparser 
+#import argparse 
+#import configparser 
 import json
 import logging 
 import os 
@@ -86,7 +86,7 @@ def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
     if response.status_code == 200:
         response = response.json()
     else:
-        logger.info('Response from the Flosight API failed')
+        logger.info('Response from the Blockbook API failed')
         sys.exit(0)
 
     committee_list = []
@@ -127,11 +127,11 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
                 if response.status_code == 200:
                     return response.json()
                 else:
-                    logger.info(f'Response from the Flosight API failed. Retry in {RETRY_TIMEOUT_SHORT}s')
+                    logger.info(f'Response from the Blockbook API failed. Retry in {RETRY_TIMEOUT_SHORT}s')
                     #sys.exit(0)
                     time.sleep(RETRY_TIMEOUT_SHORT)
             except:
-                logger.info(f'Fetch from the Flosight API failed. Retry in {RETRY_TIMEOUT_LONG}s...')
+                logger.info(f'Fetch from the Blockbook API failed. Retry in {RETRY_TIMEOUT_LONG}s...')
                 time.sleep(RETRY_TIMEOUT_LONG)
 
     url = f'{api_url}api/v1/address/{admin_flo_id}?details=txs'
@@ -208,26 +208,26 @@ def find_sender_receiver(transaction_data):
 
 def check_database_existence(type, parameters):
     if type == 'token':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'tokens', f'{parameters["token_name"]}.db')
+        path = os.path.join(_config['DATA_PATH'], 'tokens', f'{parameters["token_name"]}.db')
         return os.path.isfile(path)
     
     if type == 'smart_contract':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
         return os.path.isfile(path)
 
 
 def create_database_connection(type, parameters=None):
     if type == 'token':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'tokens', f"{parameters['token_name']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'tokens', f"{parameters['token_name']}.db")
         engine = create_engine(f"sqlite:///{path}", echo=True)
     elif type == 'smart_contract':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
         engine = create_engine(f"sqlite:///{path}", echo=True)
     elif type == 'system_dbs':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], f"system.db")
+        path = os.path.join(_config['DATA_PATH'], f"system.db")
         engine = create_engine(f"sqlite:///{path}", echo=False)
     elif type == 'latest_cache':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], f"latestCache.db")
+        path = os.path.join(_config['DATA_PATH'], f"latestCache.db")
         engine = create_engine(f"sqlite:///{path}", echo=False)
 
     connection = engine.connect()
@@ -236,19 +236,19 @@ def create_database_connection(type, parameters=None):
 
 def create_database_session_orm(type, parameters, base):
     if type == 'token':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'tokens', f"{parameters['token_name']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'tokens', f"{parameters['token_name']}.db")
         engine = create_engine(f"sqlite:///{path}", echo=True)
         base.metadata.create_all(bind=engine)
         session = sessionmaker(bind=engine)()
 
     elif type == 'smart_contract':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
         engine = create_engine(f"sqlite:///{path}", echo=True)
         base.metadata.create_all(bind=engine)
         session = sessionmaker(bind=engine)()
 
     elif type == 'system_dbs':
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], f"{parameters['db_name']}.db")
+        path = os.path.join(_config['DATA_PATH'], f"{parameters['db_name']}.db")
         engine = create_engine(f"sqlite:///{path}", echo=False)
         base.metadata.create_all(bind=engine)
         session = sessionmaker(bind=engine)()
@@ -258,7 +258,7 @@ def create_database_session_orm(type, parameters, base):
 
 def delete_contract_database(parameters):
     if check_database_existence('smart_contract', {'contract_name':f"{parameters['contract_name']}", 'contract_address':f"{parameters['contract_address']}"}):
-        path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
+        path = os.path.join(_config['DATA_PATH'], 'smartContracts', f"{parameters['contract_name']}-{parameters['contract_address']}.db")
         os.remove(path)
 
 
@@ -532,7 +532,7 @@ def processBlock(blockindex=None, blockhash=None):
         text = text.replace("\n", " \n ")
         # todo Rule 9 - Reject all noise transactions. Further rules are in parsing.py
         returnval = None
-        parsed_data = parsing.parse_flodata(text, blockinfo, _config['DEFAULT']['NET'])
+        parsed_data = parsing.parse_flodata(text, blockinfo, _config['NET'])
         if parsed_data['type'] not in ['noise', None, '']:
             logger.info(f"Processing transaction {transaction}")
             logger.info(f"flodata {text} is parsed to {parsed_data}")
@@ -2482,7 +2482,7 @@ def scanBlockchain():
         processBlock(blockindex=blockindex) 
 
     # At this point the script has updated to the latest block
-    # Now we connect to flosight's websocket API to get information about the latest blocks
+    # Now we connect to Blockbook's websocket API to get information about the latest blocks
 
 def switchNeturl(currentneturl):
     # Use modulo operation to simplify the logic
@@ -2491,9 +2491,9 @@ def switchNeturl(currentneturl):
 
 
 def reconnectWebsocket(socket_variable):
-    # Switch a to different flosight
+    # Switch a to different Blockbook
     # neturl = switchNeturl(neturl)
-    # Connect to Flosight websocket to get data on new incoming blocks
+    # Connect to Blockbook websocket to get data on new incoming blocks
     i=0
     newurl = serverlist[0]
     while(not socket_variable.connected):
@@ -2571,22 +2571,22 @@ def init_lastestcache_db():
 def init_storage_if_not_exist(reset = False):
     # Delete database and smartcontract directory if reset is set to True
 
-    token_dir_path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'tokens')
+    token_dir_path = os.path.join(_config['DATA_PATH'], 'tokens')
     create_dir_if_not_exist(token_dir_path, reset)
 
-    smart_contract_dir_path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts')
+    smart_contract_dir_path = os.path.join(_config['DATA_PATH'], 'smartContracts')
     create_dir_if_not_exist(smart_contract_dir_path, reset)
     
-    system_db_path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'system.db')
+    system_db_path = os.path.join(_config['DATA_PATH'], 'system.db')
     if os.path.exists(system_db_path):
         if reset: 
             os.remove(system_db_path)
-            init_system_db(int(_config['DEFAULT']['START_BLOCK']))
+            init_system_db(int(_config['START_BLOCK']))
     else:
-        init_system_db(int(_config['DEFAULT']['START_BLOCK']))
+        init_system_db(int(_config['START_BLOCK']))
             
     
-    latestCache_db_path = os.path.join(_config['DEFAULT']['DATA_PATH'], 'latestCache.db')
+    latestCache_db_path = os.path.join(_config['DATA_PATH'], 'latestCache.db')
     if os.path.exists(latestCache_db_path):
         if reset: 
             os.remove(latestCache_db_path)
@@ -2602,7 +2602,7 @@ def initiate_process():
     logger.setLevel(logging.DEBUG)
 
     formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
-    file_handler = logging.FileHandler(os.path.join(_config['DEFAULT']['DATA_PATH'],'tracking.log'))
+    file_handler = logging.FileHandler(os.path.join(_config['DATA_PATH'],'tracking.log'))
     file_handler.setLevel(logging.INFO)
     file_handler.setFormatter(formatter)
 
@@ -2613,42 +2613,42 @@ def initiate_process():
     logger.addHandler(stream_handler)
 
 
-    dirpath = os.path.join(_config['DEFAULT']['DATA_PATH'], 'tokens')
+    dirpath = os.path.join(_config['DATA_PATH'], 'tokens')
     if not os.path.isdir(dirpath):
         os.mkdir(dirpath)
-    dirpath = os.path.join(_config['DEFAULT']['DATA_PATH'], 'smartContracts')
+    dirpath = os.path.join(_config['DATA_PATH'], 'smartContracts')
     if not os.path.isdir(dirpath):
         os.mkdir(dirpath)
 
     # Read configuration
 
     # todo - write all assertions to make sure default configs are right 
-    if (_config['DEFAULT']['NET'] != 'mainnet') and (_config['DEFAULT']['NET'] != 'testnet'):
-        logger.error("NET parameter in _config.ini invalid. Options are either 'mainnet' or 'testnet'. Script is exiting now")
+    if (_config['NET'] != 'mainnet') and (_config['NET'] != 'testnet'):
+        logger.error("NET parameter in config.ini invalid. Options are either 'mainnet' or 'testnet'. Script is exiting now")
         sys.exit(0)
 
     # Specify mainnet and testnet server list for API calls and websocket calls 
     # Specify ADMIN ID
     global serverlist, APP_ADMIN, websocket_uri
     serverlist = None
-    if _config['DEFAULT']['NET'] == 'mainnet':
-        serverlist = _config['DEFAULT']['MAINNET_FLOSIGHT_SERVER_LIST']
+    if _config['NET'] == 'mainnet':
+        serverlist = _config['MAINNET_BLOCKBOOK_SERVER_LIST']
         APP_ADMIN = 'FNcvkz9PZNZM3HcxM1XTrVL4tgivmCkHp9'
         websocket_uri = get_websocket_uri(testnet=False)
-    elif _config['DEFAULT']['NET'] == 'testnet':
-        serverlist = _config['DEFAULT']['TESTNET_FLOSIGHT_SERVER_LIST']
+    elif _config['NET'] == 'testnet':
+        serverlist = _config['TESTNET_BLOCKBOOK_SERVER_LIST']
         APP_ADMIN = 'oWooGLbBELNnwq8Z5YmjoVjw8GhBGH3qSP'
         websocket_uri = get_websocket_uri(testnet=True)
     serverlist = serverlist.split(',')
 
     global neturl
-    neturl = _config['DEFAULT']['FLOSIGHT_NETURL']
+    neturl = _config['BLOCKBOOK_NETURL']
     global api_url
     api_url = neturl
     global tokenapi_sse_url
-    tokenapi_sse_url = _config['DEFAULT']['TOKENAPI_SSE_URL']
+    tokenapi_sse_url = _config['TOKENAPI_SSE_URL']
     global API_VERIFY
-    API_VERIFY = _config['DEFAULT']['API_VERIFY']
+    API_VERIFY = _config['API_VERIFY']
     if API_VERIFY == 'False':
         API_VERIFY = False
     elif API_VERIFY == 'True':
@@ -2657,10 +2657,10 @@ def initiate_process():
         API_VERIFY = True
 
 
-    global IGNORE_BLOCK_LIST, IGNORE_TRANSACTION_LIST
-    IGNORE_BLOCK_LIST = _config['DEFAULT']['IGNORE_BLOCK_LIST'].split(',')
+    global IGNORE_BLOCK_LIST #, IGNORE_TRANSACTION_LIST
+    IGNORE_BLOCK_LIST = _config['IGNORE_BLOCK_LIST'].split(',')
     IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]
-    IGNORE_TRANSACTION_LIST = _config['DEFAULT']['IGNORE_TRANSACTION_LIST'].split(',')
+    #IGNORE_TRANSACTION_LIST = _config['IGNORE_TRANSACTION_LIST'].split(',')
 
 def start_backend_process(config, reset = False):
     global _config
@@ -2672,11 +2672,12 @@ def start_backend_process(config, reset = False):
     scanBlockchain()
     logger.debug("Completed first scan")
     # At this point the script has updated to the latest block
-    # Now we connect to flosight's websocket API to get information about the latest blocks
-    # Neturl is the URL for Flosight API whose websocket endpoint is being connected to
+    # Now we connect to Blockbook's websocket API to get information about the latest blocks
+    # Neturl is the URL for Blockbook API whose websocket endpoint is being connected to
 
     asyncio.get_event_loop().run_until_complete(connect_to_websocket(websocket_uri)) 
 
+"""
 # Determine API source for block and transaction information
 if __name__ == "__main__":
     
@@ -2703,3 +2704,4 @@ if __name__ == "__main__":
     else:
         start_backend_process(config)
     
+"""

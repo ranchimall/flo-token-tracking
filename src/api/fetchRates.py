@@ -16,11 +16,11 @@ RETRY_TIMEOUT_REQUEST = 10 * 60 # 10 minsd
 prices = {}
 # 1. fetch old price data if its there, else create an empty db 
 def connect_database():
-    if not os.path.isfile(f"system.db"):
+    if not os.path.isfile("prices.db"):
         # create an empty db
         while True:
             try:
-                conn = sqlite3.connect('system.db')
+                conn = sqlite3.connect('prices.db')
                 c = conn.cursor()
                 c.execute('''CREATE TABLE ratepairs
                         (id integer primary key, ratepair text, price real)''')
@@ -32,7 +32,7 @@ def connect_database():
                 conn.commit()
                 conn.close()
             except:
-                print(f"Unable to create system.db, retrying in {RETRY_TIMEOUT_DB} sec")
+                print(f"Unable to create prices.db, retrying in {RETRY_TIMEOUT_DB} sec")
                 time.sleep(RETRY_TIMEOUT_DB)
             else:
                 break
@@ -43,7 +43,7 @@ def connect_database():
     global prices
     while True:
         try:
-            conn = sqlite3.connect('system.db')
+            conn = sqlite3.connect('prices.db')
             c = conn.cursor()
             ratepairs = c.execute('select ratepair, price from ratepairs')
             ratepairs = ratepairs.fetchall()           
@@ -51,7 +51,7 @@ def connect_database():
                 ratepair = list(ratepair)
                 prices[ratepair[0]] = ratepair[1]
         except:
-            print(f"Unable to read system.db, retrying in {RETRY_TIMEOUT_DB} sec")
+            print(f"Unable to read prices.db, retrying in {RETRY_TIMEOUT_DB} sec")
             time.sleep(RETRY_TIMEOUT_DB)
         else:
             break
@@ -129,14 +129,14 @@ def fetch_cryptocompare():
 def update_latest_prices():
     while True:
         try:
-            conn = sqlite3.connect('system.db')
+            conn = sqlite3.connect('prices.db')
             c = conn.cursor()
             for pair in list(prices.items()):
                 pair = list(pair)
                 c.execute(f"UPDATE ratepairs SET price={pair[1]} WHERE ratepair='{pair[0]}'")
             conn.commit()
         except:
-            print(f"Unable to write to system.db, retrying in {RETRY_TIMEOUT_DB} sec")
+            print(f"Unable to write to prices.db, retrying in {RETRY_TIMEOUT_DB} sec")
             time.sleep(RETRY_TIMEOUT_DB)
         else:
             break

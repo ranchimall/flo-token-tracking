@@ -10,7 +10,6 @@ from quart import jsonify, make_response, Quart, render_template, request, flash
 from quart_cors import cors
 import asyncio
 from typing import Optional
-from config import dbfolder, apiUrl, FLO_DATA_DIR, API_VERIFY, debug_status, HOST, PORT, APP_ADMIN
 import parsing
 import subprocess
 from apscheduler.schedulers.background import BackgroundScheduler
@@ -43,6 +42,7 @@ def check_flo_address(floaddress, is_testnet=False):
 def check_integer(value):
     return str.isdigit(value)
 
+""" ??? NOT USED???
 # Helper functions
 def retryRequest(tempserverlist, apicall):
     if len(tempserverlist) != 0:
@@ -69,6 +69,7 @@ def multiRequest(apicall, net):
         return retryRequest(mainserverlist, apicall)
     elif net == 'testnet':
         return retryRequest(testserverlist, apicall)
+"""
 
 
 def blockdetailhelper(blockdetail):
@@ -80,7 +81,7 @@ def blockdetailhelper(blockdetail):
         blockHeight = None
     
     # open the latest block database
-    conn = sqlite3.connect(os.path.join(dbfolder, 'latestCache.db'))
+    conn = sqlite3.connect(os.path.join(DATA_PATH, 'latestCache.db'))
     c = conn.cursor()
     if blockHash:
         c.execute(f"select jsonData from latestBlocks where blockHash='{blockHash}'")
@@ -91,7 +92,7 @@ def blockdetailhelper(blockdetail):
 
 def transactiondetailhelper(transactionHash):
     # open the latest block database
-    conn = sqlite3.connect(os.path.join(dbfolder, 'latestCache.db'))
+    conn = sqlite3.connect(os.path.join(DATA_PATH, 'latestCache.db'))
     c = conn.cursor()
     c.execute(f"SELECT jsonData, parsedFloData, transactionType, db_reference FROM latestTransactions WHERE transactionHash='{transactionHash}'")
     transactionJsonData = c.fetchall()
@@ -99,10 +100,13 @@ def transactiondetailhelper(transactionHash):
 
 def update_transaction_confirmations(transactionJson):
     url = f"{apiUrl}api/v1/tx/{transactionJson['txid']}"
-    response = requests.get(url)
-    if response.status_code == 200:
-        response_data = response.json()
-        transactionJson['confirmations'] = response_data['confirmations']
+    try:
+        response = requests.get(url)
+        if response.status_code == 200:
+            response_data = response.json()
+            transactionJson['confirmations'] = response_data['confirmations']
+    except Exception as e:
+        print(e)
     return transactionJson
 
 def smartcontract_morph_helper(smart_contracts):
@@ -172,14 +176,14 @@ def return_smart_contracts(connection, contractName=None, contractAddress=None):
 
 def create_database_connection(type, parameters=None):
     if type == 'token':
-        filelocation = os.path.join(dbfolder, 'tokens', parameters['token_name'])
+        filelocation = os.path.join(DATA_PATH, 'tokens', parameters['token_name'])
     elif type == 'smart_contract':
         contractDbName = '{}-{}.db'.format(parameters['contract_name'].strip(), parameters['contract_address'].strip())
-        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
     elif type == 'system_dbs':
-        filelocation = os.path.join(dbfolder, 'system.db')
+        filelocation = os.path.join(DATA_PATH, 'system.db')
     elif type == 'latest_cache':
-        filelocation = os.path.join(dbfolder, 'latestCache.db')
+        filelocation = os.path.join(DATA_PATH, 'latestCache.db')
     
     conn = sqlite3.connect(filelocation)
     c = conn.cursor()
@@ -188,7 +192,7 @@ def create_database_connection(type, parameters=None):
 def fetchContractStructure(contractName, contractAddress):
     # Make connection to contract database
     contractDbName = '{}-{}.db'.format(contractName.strip(),contractAddress.strip())
-    filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+    filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
     if os.path.isfile(filelocation):
         # fetch from contractStructure
         conn = sqlite3.connect(filelocation)
@@ -246,28 +250,36 @@ def extract_ip_op_addresses(transactionJson):
 def updatePrices():
     prices = {}
     # USD -> INR
-    response = requests.get(f"https://api.exchangerate-api.com/v4/latest/usd")
-    price = response.json()
-    prices['USDINR'] = price['rates']['INR']
-
+    try:
+        response = requests.get(f"https://api.exchangerate-api.com/v4/latest/usd")
+        price = response.json()
+        prices['USDINR'] = price['rates']['INR']
+    except Exception as e:
+        print(e)
+    
     # Blockchain stuff : BTC,FLO -> USD,INR
     # BTC->USD | BTC->INR
-    response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,flo&vs_currencies=usd,inr")
-    price = response.json()
-    prices['BTCUSD'] = price['bitcoin']['usd']
-    prices['BTCINR'] = price['bitcoin']['inr']
+    try:
+        response = requests.get(f"https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,flo&vs_currencies=usd,inr")
+        price = response.json()
+        prices['BTCUSD'] = price['bitcoin']['usd']
+        prices['BTCINR'] = price['bitcoin']['inr']
+    except Exception as e:
+        print(e)
 
     # FLO->USD | FLO->INR
-    response = requests.get(f"https://api.coinlore.net/api/ticker/?id=67")
-    price = response.json()
-    prices["FLOUSD"] = float(price[0]['price_usd'])
-    prices["FLOINR"] = float(prices["FLOUSD"]) * float(prices['USDINR'])
-
+    try:
+        response = requests.get(f"https://api.coinlore.net/api/ticker/?id=67")
+        price = response.json()
+        prices["FLOUSD"] = float(price[0]['price_usd'])
+        prices["FLOINR"] = float(prices["FLOUSD"]) * float(prices['USDINR'])
+    except Exception as e:
+        print(e)
     # 3. update latest price data
     print('Prices updated at time: %s' % datetime.now())
     print(prices)
 
-    conn = sqlite3.connect('system.db')
+    conn = sqlite3.connect('prices.db')
     c = conn.cursor()
     for pair in list(prices.items()):
         pair = list(pair)
@@ -414,7 +426,7 @@ def transaction_post_processing(transactionJsonData):
     return rowarray_list
 
 def fetch_token_transactions(token, senderFloAddress=None, destFloAddress=None, limit=None, use_and=False):
-    dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+    dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
     if os.path.exists(dblocation):
         conn = sqlite3.connect(dblocation)
         conn.row_factory = sqlite3.Row
@@ -461,7 +473,7 @@ def fetch_token_transactions(token, senderFloAddress=None, destFloAddress=None, 
     return transaction_post_processing(transactionJsonData)
 
 def fetch_contract_transactions(contractName, contractAddress, _from=0, to=100):
-    sc_file = os.path.join(dbfolder, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
+    sc_file = os.path.join(DATA_PATH, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
     conn = sqlite3.connect(sc_file)
     c = conn.cursor()
     # Find token db names and attach
@@ -470,8 +482,8 @@ def fetch_contract_transactions(contractName, contractAddress, _from=0, to=100):
     if contractStructure['contractType'] == 'continuos-event':
         token1 = contractStructure['accepting_token']
         token2 = contractStructure['selling_token']
-        token1_file = f"{dbfolder}/tokens/{token1}.db"
-        token2_file = f"{dbfolder}/tokens/{token2}.db"
+        token1_file = f"{DATA_PATH}/tokens/{token1}.db"
+        token2_file = f"{DATA_PATH}/tokens/{token2}.db"
         conn.execute(f"ATTACH DATABASE '{token1_file}' AS token1db")
         conn.execute(f"ATTACH DATABASE '{token2_file}' AS token2db")
 
@@ -497,7 +509,7 @@ def fetch_contract_transactions(contractName, contractAddress, _from=0, to=100):
 
     elif contractStructure['contractType'] == 'one-time-event':
         token1 = contractStructure['tokenIdentification']
-        token1_file = f"{dbfolder}/tokens/{token1}.db"
+        token1_file = f"{DATA_PATH}/tokens/{token1}.db"
         conn.execute(f"ATTACH DATABASE '{token1_file}' AS token1db")
 
         transaction_query = f'''
@@ -526,15 +538,15 @@ def fetch_contract_transactions(contractName, contractAddress, _from=0, to=100):
 
 
 def fetch_swap_contract_transactions(contractName, contractAddress, transactionHash=None):
-    sc_file = os.path.join(dbfolder, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
+    sc_file = os.path.join(DATA_PATH, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
     conn = sqlite3.connect(sc_file)
     c = conn.cursor()
     # Find token db names and attach
     contractStructure = fetchContractStructure(contractName, contractAddress)
     token1 = contractStructure['accepting_token']
     token2 = contractStructure['selling_token']
-    token1_file = f"{dbfolder}/tokens/{token1}.db"
-    token2_file = f"{dbfolder}/tokens/{token2}.db"
+    token1_file = f"{DATA_PATH}/tokens/{token1}.db"
+    token2_file = f"{DATA_PATH}/tokens/{token2}.db"
     conn.execute(f"ATTACH DATABASE '{token1_file}' AS token1db")
     conn.execute(f"ATTACH DATABASE '{token2_file}' AS token2db")
     
@@ -606,7 +618,7 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
         if response.status_code == 200:
             return response.json()
         else:
-            print('Response from the Flosight API failed')
+            print('Response from the Blockbook API failed')
             sys.exit(0)
 
     url = f'{api_url}api/v1/address/{admin_flo_id}?details=txs'
@@ -635,7 +647,7 @@ async def systemData():
     try:
 
         # query for the number of flo addresses in tokenAddress mapping
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
         tokenAddressCount = c.execute('select count(distinct tokenAddress) from tokenAddressMapping').fetchall()[0][0]
         tokenCount = c.execute('select count(distinct token) from tokenAddressMapping').fetchall()[0][0]
@@ -644,7 +656,7 @@ async def systemData():
         conn.close()
 
         # query for total number of validated blocks
-        conn = sqlite3.connect(os.path.join(dbfolder, 'latestCache.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'latestCache.db'))
         c = conn.cursor()
         validatedBlockCount = c.execute('select count(distinct blockNumber) from latestBlocks').fetchall()[0][0]
         validatedTransactionCount = c.execute('select count(distinct transactionHash) from latestTransactions').fetchall()[0][0]
@@ -671,8 +683,8 @@ async def broadcastTx(raw_transaction_hash):
 async def getTokenList():
     try:
         filelist = []
-        for item in os.listdir(os.path.join(dbfolder, 'tokens')):
-            if os.path.isfile(os.path.join(dbfolder, 'tokens', item)):
+        for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
+            if os.path.isfile(os.path.join(DATA_PATH, 'tokens', item)):
                 filelist.append(item[:-3])
         return jsonify(tokens=filelist, result='ok')    
     except Exception as e:
@@ -687,7 +699,7 @@ async def getTokenInfo():
         if token is None:
             return jsonify(result='error', description='token name hasnt been passed')
         
-        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -732,7 +744,7 @@ async def getTokenTransactions():
         if token is None:
             return jsonify(result='error', description='token name hasnt been passed')
         
-        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             conn.row_factory = sqlite3.Row
@@ -784,7 +796,7 @@ async def getTokenBalances():
         if token is None:
             return jsonify(result='error', description='token name hasnt been passed')
         
-        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -813,7 +825,7 @@ async def getFloAddressInfo():
         if floAddress is None:
             return jsonify(description='floAddress hasn\'t been passed'), 400 
         
-        dblocation = dbfolder + '/system.db'
+        dblocation = os.path.join(DATA_PATH, 'system.db')
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -826,7 +838,7 @@ async def getFloAddressInfo():
                 detailList = {}
                 for token in tokenNames:
                     token = token[0]
-                    dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+                    dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
                     if os.path.exists(dblocation):
                         tempdict = {}
                         conn = sqlite3.connect(dblocation)
@@ -872,7 +884,7 @@ async def getAddressBalance():
             return jsonify(result='error', description='floAddress hasn\'t been passed')
 
         if token is None:
-            dblocation = dbfolder + '/system.db'
+            dblocation = os.path.join(DATA_PATH, 'system.db')
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
@@ -885,7 +897,7 @@ async def getAddressBalance():
 
                     for token in tokenNames:
                         token = token[0]
-                        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+                        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
                         if os.path.exists(dblocation):
                             tempdict = {}
                             conn = sqlite3.connect(dblocation)
@@ -902,7 +914,7 @@ async def getAddressBalance():
                     # Address is not associated with any token
                     return jsonify(result='error', description='FLO address is not associated with any tokens')
         else:
-            dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+            dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
@@ -930,14 +942,14 @@ async def getFloAddressTransactions():
             return jsonify(result='error', description='floAddress has not been passed')
         
         if token is None:
-            dblocation = dbfolder + '/system.db'
+            dblocation = os.path.join(DATA_PATH, 'system.db')
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
                 c.execute('SELECT token FROM tokenAddressMapping WHERE tokenAddress="{}"'.format(floAddress))
                 tokenNames = c.fetchall()
         else:
-            dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+            dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 tokenNames = [[str(token), ]]
             else:
@@ -947,7 +959,7 @@ async def getFloAddressTransactions():
             allTransactionList = {}
             for tokenname in tokenNames:
                 tokenname = tokenname[0]
-                dblocation = dbfolder + '/tokens/' + str(tokenname) + '.db'
+                dblocation = DATA_PATH + '/tokens/' + str(tokenname) + '.db'
                 if os.path.exists(dblocation):
                     tempdict = {}
                     conn = sqlite3.connect(dblocation)
@@ -985,7 +997,7 @@ async def getContractList():
         contractName = request.args.get('contractName')
         contractAddress = request.args.get('contractAddress')
 
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
 
         contractList = []
@@ -1090,7 +1102,7 @@ async def getContractInfo():
             return jsonify(result='error', description='Smart Contract\'s address hasn\'t been passed')
 
         contractDbName = '{}-{}.db'.format(contractName.strip(),contractAddress.strip())
-        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
 
         if os.path.isfile(filelocation):
             # Make db connection and fetch data
@@ -1125,7 +1137,7 @@ async def getContractInfo():
             returnval['tokenAmountDeposited'] = totalAmount
             conn.close()
 
-            conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+            conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
             c = conn.cursor()
             c.execute('select status, incorporationDate, expiryDate, closeDate from activecontracts where contractName=="{}" and contractAddress=="{}"'.format(contractName.strip(), contractAddress.strip()))
             results = c.fetchall()
@@ -1196,7 +1208,7 @@ async def getcontractparticipants():
 
         contractName = contractName.strip()
         contractAddress = contractAddress.strip()
-        filelocation = os.path.join(dbfolder, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
 
         if os.path.isfile(filelocation):
             # Make db connection and fetch data
@@ -1278,7 +1290,7 @@ async def getParticipantDetails():
 
         if floAddress is None:
             return jsonify(result='error', description='FLO address hasn\'t been passed')
-        dblocation = os.path.join(dbfolder, 'system.db')
+        dblocation = os.path.join(DATA_PATH, 'system.db')
 
         if (contractName and contractAddress is None) or (contractName is None and contractAddress):
             return jsonify(result='error', description='pass both, contractName and contractAddress as url parameters')
@@ -1299,7 +1311,7 @@ async def getParticipantDetails():
                 participationDetailsList = []
                 for contract in participant_address_contracts:
                     detailsDict = {}
-                    contract_db = os.path.join(dbfolder, 'smartContracts', f"{contract[3]}-{contract[4]}.db")
+                    contract_db = os.path.join(DATA_PATH, 'smartContracts', f"{contract[3]}-{contract[4]}.db")
                     # Make db connection and fetch contract structure
                     conn = sqlite3.connect(contract_db)
                     c = conn.cursor()
@@ -1370,7 +1382,7 @@ async def getParticipantDetails():
                         
                         # check if the contract has been closed
                         contractDbName = '{}-{}.db'.format(detailsDict['contractName'].strip(), detailsDict['contractAddress'].strip())
-                        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+                        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
                         if os.path.isfile(filelocation):
                             # Make db connection and fetch data
                             conn = sqlite3.connect(filelocation)
@@ -1423,7 +1435,7 @@ async def getParticipantDetails():
 
                         # check if the contract has been closed
                         contractDbName = '{}-{}.db'.format(detailsDict['contractName'].strip(), detailsDict['contractAddress'].strip())
-                        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+                        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
                         if os.path.isfile(filelocation):
                             # Make db connection and fetch data
                             conn = sqlite3.connect(filelocation)
@@ -1488,7 +1500,7 @@ async def getsmartcontracttransactions():
             return jsonify(result='error', description='Smart Contract\'s address hasn\'t been passed')
 
         contractDbName = '{}-{}.db'.format(contractName.strip(), contractAddress.strip())
-        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
 
         if os.path.isfile(filelocation):
             # Make db connection and fetch data
@@ -1553,7 +1565,7 @@ async def getLatestTransactionDetails():
             
         numberOfLatestBlocks = request.args.get('numberOfLatestBlocks')
 
-        dblocation = dbfolder + '/latestCache.db'
+        dblocation = DATA_PATH + '/latestCache.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -1599,7 +1611,7 @@ async def getLatestTransactionDetails():
 async def getLatestBlockDetails():
     try:
         limit = request.args.get('limit')
-        dblocation = dbfolder + '/latestCache.db'
+        dblocation = DATA_PATH + '/latestCache.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -1662,14 +1674,14 @@ async def categoriseString(urlstring):
                 return jsonify(type='block')
             else:
                 # check urlstring is a token name
-                tokenfolder = os.path.join(dbfolder, 'tokens')
+                tokenfolder = os.path.join(DATA_PATH, 'tokens')
                 onlyfiles = [f[:-3]
                             for f in os.listdir(tokenfolder) if os.path.isfile(os.path.join(tokenfolder, f))]
                 
                 if urlstring.lower() in onlyfiles:
                     return jsonify(type='token')
                 else:
-                    contractfolder = os.path.join(dbfolder, 'system.db')
+                    contractfolder = os.path.join(DATA_PATH, 'system.db')
                     conn = sqlite3.connect(contractfolder)
                     conn.row_factory = lambda cursor, row: row[0]
                     c = conn.cursor()
@@ -1690,12 +1702,12 @@ async def getTokenSmartContractList():
     try:
         # list of tokens
         filelist = []
-        for item in os.listdir(os.path.join(dbfolder, 'tokens')):
-            if os.path.isfile(os.path.join(dbfolder, 'tokens', item)):
+        for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
+            if os.path.isfile(os.path.join(DATA_PATH, 'tokens', item)):
                 filelist.append(item[:-3])
 
         # list of smart contracts
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
         contractList = []
         c.execute('SELECT * FROM activecontracts')
@@ -1732,7 +1744,7 @@ async def getTokenSmartContractList():
 async def info():
     try:
         # query for the number of flo addresses in tokenAddress mapping
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
         tokenAddressCount = c.execute('SELECT COUNT(distinct tokenAddress) FROM tokenAddressMapping').fetchall()[0][0]
         tokenCount = c.execute('SELECT COUNT(distinct token) FROM tokenAddressMapping').fetchall()[0][0]
@@ -1741,7 +1753,7 @@ async def info():
         conn.close()
         
         # query for total number of validated blocks
-        conn = sqlite3.connect(os.path.join(dbfolder, 'latestCache.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'latestCache.db'))
         c = conn.cursor()
         validatedBlockCount = c.execute('SELECT COUNT(distinct blockNumber) FROM latestBlocks').fetchall()[0][0]
         validatedTransactionCount = c.execute('SELECT COUNT(distinct transactionHash) FROM latestTransactions').fetchall()[0][0]
@@ -1770,8 +1782,8 @@ async def broadcastTx_v2(raw_transaction_hash):
 async def tokenList():
     try:
         filelist = []
-        for item in os.listdir(os.path.join(dbfolder, 'tokens')):
-            if os.path.isfile(os.path.join(dbfolder, 'tokens', item)):
+        for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
+            if os.path.isfile(os.path.join(DATA_PATH, 'tokens', item)):
                 filelist.append(item[:-3])
         return jsonify(tokens=filelist), 200
     except Exception as e:
@@ -1787,7 +1799,7 @@ async def tokenInfo(token):
             return jsonify(description='Token name hasnt been passed'), 400
         
         # todo : input validation
-        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -1849,7 +1861,7 @@ async def tokenTransactions(token):
         if to<1:
             return jsonify(description='to validation failed'), 400
         
-        filelocation = os.path.join(dbfolder, 'tokens', f'{token}.db')
+        filelocation = os.path.join(DATA_PATH, 'tokens', f'{token}.db')
 
         if os.path.isfile(filelocation):
             transactionJsonData = fetch_token_transactions(token, senderFloAddress, destFloAddress, limit, use_AND)
@@ -1869,7 +1881,7 @@ async def tokenBalances(token):
         if token is None:
             return jsonify(description='Token name hasnt been passed'), 400
 
-        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -1898,7 +1910,7 @@ async def floAddressInfo(floAddress):
         if not check_flo_address(floAddress, is_testnet):
             return jsonify(description='floAddress validation failed'), 400 
 
-        dblocation = dbfolder + '/system.db'
+        dblocation = os.path.join(DATA_PATH, 'system.db')
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -1911,7 +1923,7 @@ async def floAddressInfo(floAddress):
                 detailList = {}
                 for token in tokenNames:
                     token = token[0]
-                    dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+                    dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
                     if os.path.exists(dblocation):
                         tempdict = {}
                         conn = sqlite3.connect(dblocation)
@@ -1958,7 +1970,7 @@ async def floAddressBalance(floAddress):
         
         token = request.args.get('token')
         if token is None:
-            dblocation = dbfolder + '/system.db'
+            dblocation = os.path.join(DATA_PATH, 'system.db')
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
@@ -1969,7 +1981,7 @@ async def floAddressBalance(floAddress):
                     detailList = {}
                     for token in tokenNames:
                         token = token[0]
-                        dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+                        dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
                         if os.path.exists(dblocation):
                             tempdict = {}
                             conn = sqlite3.connect(dblocation)
@@ -1984,7 +1996,7 @@ async def floAddressBalance(floAddress):
                     # Address is not associated with any token
                     return jsonify(floAddress=floAddress, floAddressBalances={}), 200
         else:
-            dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+            dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
@@ -2013,14 +2025,14 @@ async def floAddressTransactions(floAddress):
         
         token = request.args.get('token')
         if token is None:
-            dblocation = dbfolder + '/system.db'
+            dblocation = os.path.join(DATA_PATH, 'system.db')
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
                 c.execute('SELECT token FROM tokenAddressMapping WHERE tokenAddress="{}"'.format(floAddress))
                 tokenNames = c.fetchall()
         else:
-            dblocation = dbfolder + '/tokens/' + str(token) + '.db'
+            dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 tokenNames = [[str(token), ]]
             else:
@@ -2062,7 +2074,7 @@ async def getContractList_v2():
                 return jsonify(description='contractAddress validation failed'), 400
         
         contractList = []
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
         smart_contracts = return_smart_contracts(c, contractName, contractAddress)
         smart_contracts_morphed = smartcontract_morph_helper(smart_contracts)
@@ -2175,7 +2187,7 @@ async def getcontractparticipants_v2():
         if not check_flo_address(contractAddress, is_testnet):
             return jsonify(description='contractAddress validation failed'), 400
         
-        filelocation = os.path.join(dbfolder, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', '{}-{}.db'.format(contractName, contractAddress))
         if os.path.isfile(filelocation):
             # Make db connection and fetch data
             contractStructure = fetchContractStructure(contractName, contractAddress)
@@ -2262,7 +2274,7 @@ async def participantDetails(floAddress):
             return jsonify(description='pass both, contractName and contractAddress as url parameters'), 400
         contractName = contractName.strip().lower()
 
-        systemdb_location = os.path.join(dbfolder, 'system.db')
+        systemdb_location = os.path.join(DATA_PATH, 'system.db')
         if os.path.isfile(systemdb_location):
             # Make db connection and fetch data
             systemdb_conn = sqlite3.connect(systemdb_location)
@@ -2277,7 +2289,7 @@ async def participantDetails(floAddress):
                 participationDetailsList = []
                 for contract in participant_address_contracts:
                     detailsDict = {}
-                    contract_db = os.path.join(dbfolder, 'smartContracts', f"{contract[3]}-{contract[4]}.db")
+                    contract_db = os.path.join(DATA_PATH, 'smartContracts', f"{contract[3]}-{contract[4]}.db")
                     # Make db connection and fetch contract structure
                     contractdb_conn = sqlite3.connect(contract_db)
                     contract_c = contractdb_conn.cursor()
@@ -2330,7 +2342,7 @@ async def participantDetails(floAddress):
                             detailsDict['closeDate'] = temp[0][7]
                         
                         # check if the contract has been closed
-                        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+                        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
                         if os.path.isfile(filelocation):
                             if 'payeeAddress' in contractStructure:
                                 # contract is of the type external trigger
@@ -2361,7 +2373,7 @@ async def participantDetails(floAddress):
                             detailsDict['closeDate'] = temp[0][7]
 
                         # check if the contract has been closed
-                        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+                        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
                         if os.path.isfile(filelocation):
                             # Make db connection and fetch data
                             contract_c.execute('SELECT attribute,value FROM contractstructure')
@@ -2427,7 +2439,7 @@ async def smartcontracttransactions():
             return jsonify(description='to validation failed'), 400
         
         contractDbName = '{}-{}.db'.format(contractName, contractAddress)
-        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
 
         if os.path.isfile(filelocation):
             # Make db connection and fetch data
@@ -2460,7 +2472,7 @@ async def smartcontractdeposits():
             return jsonify(description='contractAddress validation failed'), 400
 
         contractDbName = '{}-{}.db'.format(contractName, contractAddress)
-        filelocation = os.path.join(dbfolder, 'smartContracts', contractDbName)
+        filelocation = os.path.join(DATA_PATH, 'smartContracts', contractDbName)
         if os.path.isfile(filelocation):
             # active deposits 
             conn = sqlite3.connect(filelocation)
@@ -2532,7 +2544,7 @@ async def transactiondetails1(transactionHash):
             operationDetails = {}
             if operation == 'smartContractDeposit':
                 # open the db reference and check if there is a deposit return 
-                conn = sqlite3.connect(f"{dbfolder}/smartContracts/{db_reference}.db")
+                conn = sqlite3.connect(f"{DATA_PATH}/smartContracts/{db_reference}.db")
                 c = conn.cursor()
                 c.execute("SELECT depositAmount, blockNumber FROM contractdeposits WHERE status='deposit-return' AND transactionHash=?",(transactionJson['txid'],))
                 returned_deposit_tx = c.fetchall()
@@ -2553,7 +2565,7 @@ async def transactiondetails1(transactionHash):
                 operationDetails['consumedAmount'] = parseResult['depositAmount'] - operationDetails['depositBalance']
 
             elif operation == 'tokenswap-participation':
-                conn = sqlite3.connect(f"{dbfolder}/smartContracts/{db_reference}.db")
+                conn = sqlite3.connect(f"{DATA_PATH}/smartContracts/{db_reference}.db")
                 c = conn.cursor()
                 c.execute('SELECT tokenAmount, winningAmount, userChoice FROM contractparticipants WHERE transactionHash=?',(transactionJson['txid'],))
                 swap_amounts = c.fetchall()
@@ -2568,7 +2580,7 @@ async def transactiondetails1(transactionHash):
             elif operation == 'smartContractPays':
                 # Find what happened because of the trigger 
                 # Find who 
-                conn = sqlite3.connect(f"{dbfolder}/smartContracts/{db_reference}.db")
+                conn = sqlite3.connect(f"{DATA_PATH}/smartContracts/{db_reference}.db")
                 c = conn.cursor()
                 c.execute('SELECT participantAddress, tokenAmount, userChoice, winningAmount FROM contractparticipants WHERE winningAmount IS NOT NULL')
                 winner_participants = c.fetchall()
@@ -2585,7 +2597,7 @@ async def transactiondetails1(transactionHash):
 
             elif operation == 'ote-externaltrigger-participation':
                 # Find if this guy has won 
-                conn = sqlite3.connect(f"{dbfolder}/smartContracts/{db_reference}.db")
+                conn = sqlite3.connect(f"{DATA_PATH}/smartContracts/{db_reference}.db")
                 c = conn.cursor()
                 c.execute('SELECT winningAmount FROM contractparticipants WHERE transactionHash=?',(transactionHash,))
                 winningAmount = c.fetchall()
@@ -2594,7 +2606,7 @@ async def transactiondetails1(transactionHash):
             
             elif operation == 'tokenswapParticipation':
                 contractName, contractAddress = db_reference.rsplit('-',1)
-                conn = sqlite3.connect(f"{dbfolder}/smartContracts/{db_reference}.db")
+                conn = sqlite3.connect(f"{DATA_PATH}/smartContracts/{db_reference}.db")
                 c = conn.cursor()            
                 txhash_txs = fetch_swap_contract_transactions(contractName, contractAddress, transactionHash)
                 mergeTx['subTransactions'] = []
@@ -2620,7 +2632,7 @@ async def latestTransactionDetails():
         if limit is not None and not check_integer(limit):
             return jsonify(description='limit validation failed'), 400
 
-        dblocation = dbfolder + '/latestCache.db'
+        dblocation = DATA_PATH + '/latestCache.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -2660,7 +2672,7 @@ async def latestBlockDetails():
         if limit is not None and not check_integer(limit):
             return jsonify(description='limit validation failed'), 400
 
-        dblocation = dbfolder + '/latestCache.db'
+        dblocation = DATA_PATH + '/latestCache.db'
         if os.path.exists(dblocation):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
@@ -2723,13 +2735,13 @@ async def categoriseString_v2(urlstring):
                 return jsonify(type='block'), 200
             else:
                 # check urlstring is a token name
-                tokenfolder = os.path.join(dbfolder, 'tokens')
+                tokenfolder = os.path.join(DATA_PATH, 'tokens')
                 onlyfiles = [f[:-3]
                             for f in os.listdir(tokenfolder) if os.path.isfile(os.path.join(tokenfolder, f))]
                 if urlstring.lower() in onlyfiles:
                     return jsonify(type='token'), 200
                 else:
-                    systemdb = os.path.join(dbfolder, 'system.db')
+                    systemdb = os.path.join(DATA_PATH, 'system.db')
                     conn = sqlite3.connect(systemdb)
                     conn.row_factory = lambda cursor, row: row[0]
                     c = conn.cursor()
@@ -2750,8 +2762,8 @@ async def tokenSmartContractList():
     try:
         # list of tokens
         filelist = []
-        for item in os.listdir(os.path.join(dbfolder, 'tokens')):
-            if os.path.isfile(os.path.join(dbfolder, 'tokens', item)):
+        for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
+            if os.path.isfile(os.path.join(DATA_PATH, 'tokens', item)):
                 filelist.append(item[:-3])
 
         # list of smart contracts
@@ -2765,7 +2777,7 @@ async def tokenSmartContractList():
             contractAddress = contractAddress.strip()
             if not check_flo_address(contractAddress, is_testnet):
                 return jsonify(description='contractAddress validation failed'), 400
-        conn = sqlite3.connect(os.path.join(dbfolder, 'system.db'))
+        conn = sqlite3.connect(os.path.join(DATA_PATH, 'system.db'))
         c = conn.cursor()
         smart_contracts = return_smart_contracts(c, contractName, contractAddress)
         smart_contracts_morphed = smartcontract_morph_helper(smart_contracts)
@@ -2832,8 +2844,8 @@ async def sse():
 @app.route('/api/v2/prices', methods=['GET'])
 async def priceData():
     try:
-        # read system.db for price data
-        conn = sqlite3.connect('system.db')
+        # read prices.db for price data
+        conn = sqlite3.connect('prices.db')
         c = conn.cursor()
         ratepairs = c.execute('select ratepair, price from ratepairs')
         ratepairs = ratepairs.fetchall()
@@ -2851,30 +2863,46 @@ async def priceData():
 #######################
 #######################
 
-# if system.db isn't present, initialize it
-if not os.path.isfile(f"system.db"):
-    # create an empty db
-    conn = sqlite3.connect('system.db')
-    c = conn.cursor()
-    c.execute('''CREATE TABLE ratepairs (id integer primary key, ratepair text, price real)''')
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCBTC', 1)")
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCUSD', -1)")
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCINR', -1)")
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('FLOUSD', -1)")
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('FLOINR', -1)")
-    c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('USDINR', -1)")
-    conn.commit()
-    conn.close()
+def initialize_db():
+    # if prices.db isn't present, initialize it
+    if not os.path.isfile(f"prices.db"):
+        # create an empty db
+        conn = sqlite3.connect('prices.db')
+        c = conn.cursor()
+        c.execute('''CREATE TABLE ratepairs (id integer primary key, ratepair text, price real)''')
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCBTC', 1)")
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCUSD', -1)")
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('BTCINR', -1)")
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('FLOUSD', -1)")
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('FLOINR', -1)")
+        c.execute("INSERT INTO ratepairs(ratepair, price) VALUES ('USDINR', -1)")
+        conn.commit()
+        conn.close()
 
-    # update the prices once
-    updatePrices()
+        # update the prices once
+        updatePrices()
 
-# assign a scheduler for updating prices in the background
-scheduler = BackgroundScheduler()
-scheduler.add_job(func=updatePrices, trigger="interval", seconds=600)
-scheduler.start()
-# Shut down the scheduler when exiting the app
-atexit.register(lambda: scheduler.shutdown())
+def set_configs(config):
+    global DATA_PATH, apiUrl, FLO_DATA_DIR, API_VERIFY, debug_status, HOST, PORT, APP_ADMIN
+    DATA_PATH = config["DATA_PATH"]
+    apiUrl = config["apiUrl"]
+    FLO_DATA_DIR = config["FLO_DATA_DIR"]
+    API_VERIFY = config["API_VERIFY"] or True
+    debug_status = config["debug_status"]
+    HOST = config["HOST"]
+    PORT = config["PORT"]
+    APP_ADMIN = config["APP_ADMIN"]
 
-if __name__ == "__main__":
+def init_process():
+    initialize_db()
+    # assign a scheduler for updating prices in the background
+    scheduler = BackgroundScheduler()
+    scheduler.add_job(func=updatePrices, trigger="interval", seconds=600)
+    scheduler.start()
+    # Shut down the scheduler when exiting the app
+    atexit.register(lambda: scheduler.shutdown())
+
+def start_api_server(config):
+    set_configs(config)
+    init_process()
     app.run(debug=debug_status, host=HOST, port=PORT)

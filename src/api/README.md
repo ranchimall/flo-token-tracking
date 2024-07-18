@@ -26,7 +26,7 @@ sse_pubKey = '< YOUR PUBLIC KEY FROM THE PUBLIC KEY PAIR >'
 
 To start the API, execute the following from inside the folder
 ```
-python ranchimallflo_api.py
+python api_main.py
 ```
 
 ## API HTTP Endpoints

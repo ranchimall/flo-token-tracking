@@ -29,18 +29,23 @@ Docker-compatibility branch is needed right now because Docker image made for fl
    ```
    # config.ini
    [DEFAULT]
-    NET = testnet
-    FLO_CLI_PATH = /usr/local/bin/flo-cli
-    START_BLOCK = 740400
-    
-    # config.py
-    committeeAddressList = ['oVwmQnQGtXjRpP7dxJeiRGd5azCrJiB6Ka']
-    sseAPI_url = 'https://ranchimallflo-testnet.duckdns.org/'
+      NET = testnet
+      FLO_CLI_PATH = /usr/local/bin/flo-cli
+      START_BLOCK = 740400
+      FLOSIGHT_NETURL = https://0.0.0.0:19166/
+      TESTNET_FLOSIGHT_SERVER_LIST = https://0.0.0.0:19166/
+      MAINNET_FLOSIGHT_SERVER_LIST = https://blockbook.ranchimall.net/
+      TOKENAPI_SSE_URL = https://ranchimallflo-testnet-blockbook.ranchimall.net
+      IGNORE_BLOCK_LIST = 902446
+      IGNORE_TRANSACTION_LIST = b4ac4ddb51188b28b39bcb3aa31357d5bfe562c21e8aaf8dde0ec560fc893174
+      DATA_PATH = /home/production/deployed/ftt-blockbook-migration-testnet-rescan
+      APP_ADMIN = oWooGLbBELNnwq8Z5YmjoVjw8GhBGH3qSP
     ```
     
    For mainnet 
    ```
    # config.ini
+   [DEFAULT]
       NET = mainnet
       FLO_CLI_PATH = /usr/local/bin/flo-cli
       START_BLOCK = 3387900

@@ -41,14 +41,18 @@ Docker-compatibility branch is needed right now because Docker image made for fl
    For mainnet 
    ```
    # config.ini
-   [DEFAULT]
-    NET = mainnet
-    FLO_CLI_PATH = /usr/local/bin/flo-cli
-    START_BLOCK = 3387900
-    
-    # config.py
-    committeeAddressList = ['FRwwCqbP7DN4z5guffzzhCSgpD8Q33hUG8']
-    sseAPI_url = 'https://ranchimallflo.duckdns.org/'
+      NET = mainnet
+      FLO_CLI_PATH = /usr/local/bin/flo-cli
+      START_BLOCK = 3387900
+      FLOSIGHT_NETURL = https://blockbook.ranchimall.net/
+      TESTNET_FLOSIGHT_SERVER_LIST = https://0.0.0.0:19166/
+      MAINNET_FLOSIGHT_SERVER_LIST = https://blockbook.ranchimall.net/
+      TOKENAPI_SSE_URL = https://ranchimallflo-blockbook.ranchimall.net
+      IGNORE_BLOCK_LIST = 2
+      IGNORE_TRANSACTION_LIST = b4
+      DATA_PATH = /home/production/deployed/ftt-blockbook-migration-rescan
+      APP_ADMIN = FNcvkz9PZNZM3HcxM1XTrVL4tgivmCkHp9
+      API_VERIFY = False
     ```
     
 4. If running for the first time, run  `python3.7 tracktokens-smartcontracts.py --reset` otherwise run `python3.7 tracktokens-smartcontracts.py`

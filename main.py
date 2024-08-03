@@ -26,11 +26,12 @@ if __name__ == "__main__":
         t1 = threading.Thread(target=lambda:start_backend_process(config=_config))
     t1.start()
     # sleep until backend is started, so that API server can function correctly (TODO: sleep until backend process returns some flag indicating its started)
-    time.sleep(DELAY_API_SERVER_START)
+    #time.sleep(DELAY_API_SERVER_START)
     
     # start the API server
-    t2 = threading.Thread(target=lambda: start_api_server(config=_config))
-    t2.start()
+    start_api_server(config=_config)
+    #t2 = threading.Thread(target=lambda: start_api_server(config=_config))
+    #t2.start()
 
     t1.join()
-    t2.join()
+    #t2.join()

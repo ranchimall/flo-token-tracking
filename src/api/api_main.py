@@ -2881,7 +2881,10 @@ def set_configs(config):
     DATA_PATH = config["DATA_PATH"]
     apiUrl = config["apiUrl"]
     FLO_DATA_DIR = config["FLO_DATA_DIR"]
-    API_VERIFY = config["API_VERIFY"] or True
+    if "API_VERIFY" in config:
+        API_VERIFY = config["API_VERIFY"]
+    else:
+        API_VERIFY = True
     debug_status = config["debug_status"]
     HOST = config["HOST"]
     PORT = config["PORT"]

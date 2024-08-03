@@ -10,7 +10,7 @@ from quart import jsonify, make_response, Quart, render_template, request, flash
 from quart_cors import cors
 import asyncio
 from typing import Optional
-import parsing
+import src.api.parsing as parsing
 import subprocess
 from apscheduler.schedulers.background import BackgroundScheduler
 import atexit
@@ -28,12 +28,6 @@ INTERNAL_ERROR = "Unable to process request, try again later"
 
 # Global values and configg
 internalTransactionTypes = [ 'tokenswapDepositSettlement', 'tokenswapParticipationSettlement', 'smartContractDepositReturn']
-
-if net == 'mainnet':
-    is_testnet = False
-elif net == 'testnet':
-    is_testnet = True
-
 
 # Validation functionss
 def check_flo_address(floaddress, is_testnet=False):
@@ -2883,7 +2877,7 @@ def initialize_db():
         updatePrices()
 
 def set_configs(config):
-    global DATA_PATH, apiUrl, FLO_DATA_DIR, API_VERIFY, debug_status, HOST, PORT, APP_ADMIN
+    global DATA_PATH, apiUrl, FLO_DATA_DIR, API_VERIFY, debug_status, HOST, PORT, APP_ADMIN, NET, is_testnet
     DATA_PATH = config["DATA_PATH"]
     apiUrl = config["apiUrl"]
     FLO_DATA_DIR = config["FLO_DATA_DIR"]
@@ -2892,6 +2886,11 @@ def set_configs(config):
     HOST = config["HOST"]
     PORT = config["PORT"]
     APP_ADMIN = config["APP_ADMIN"]
+    NET = config["NET"]
+    if NET == 'mainnet':
+        is_testnet = False
+    elif NET == 'testnet':
+        is_testnet = True
 
 def init_process():
     initialize_db()
@@ -2905,4 +2904,5 @@ def init_process():
 def start_api_server(config):
     set_configs(config)
     init_process()
+    print("Starting API server at port=", PORT)
     app.run(debug=debug_status, host=HOST, port=PORT)

@@ -11,24 +11,23 @@ from sqlalchemy import create_engine, func, and_
 from sqlalchemy.orm import sessionmaker 
 import time 
 import arrow 
-import parsing 
-from parsing import perform_decimal_operation
+import src.backend.parsing as parsing
+from src.backend.parsing import perform_decimal_operation
 import re 
 from datetime import datetime 
 from ast import literal_eval 
-from models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, TokenContractAssociation, ContractBase, ContractStructure, ContractParticipants, ContractTransactionHistory, ContractDeposits, ConsumedInfo, ContractWinners, ContinuosContractBase, ContractStructure2, ContractParticipants2, ContractDeposits2, ContractTransactionHistory2, SystemBase, ActiveContracts, SystemData, ContractAddressMapping, TokenAddressMapping, DatabaseTypeMapping, TimeActions, RejectedContractTransactionHistory, RejectedTransactionHistory, LatestCacheBase, LatestTransactions, LatestBlocks 
-from statef_processing import process_stateF 
+from src.backend.models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, TokenContractAssociation, ContractBase, ContractStructure, ContractParticipants, ContractTransactionHistory, ContractDeposits, ConsumedInfo, ContractWinners, ContinuosContractBase, ContractStructure2, ContractParticipants2, ContractDeposits2, ContractTransactionHistory2, SystemBase, ActiveContracts, SystemData, ContractAddressMapping, TokenAddressMapping, DatabaseTypeMapping, TimeActions, RejectedContractTransactionHistory, RejectedTransactionHistory, LatestCacheBase, LatestTransactions, LatestBlocks 
+from src.backend.statef_processing import process_stateF 
 import asyncio
 import websockets
 from decimal import Decimal
 import pdb
-from util_rollback import rollback_to_block
+from src.backend.util_rollback import rollback_to_block
 
 
 RETRY_TIMEOUT_LONG = 30 * 60 # 30 mins
 RETRY_TIMEOUT_SHORT = 60 # 1 min
 DB_RETRY_TIMEOUT = 60 # 60 seconds
-
 
 def newMultiRequest(apicall):
     current_server = serverlist[0]
@@ -2639,8 +2638,7 @@ def initiate_process():
         serverlist = _config['TESTNET_BLOCKBOOK_SERVER_LIST']
         APP_ADMIN = 'oWooGLbBELNnwq8Z5YmjoVjw8GhBGH3qSP'
         websocket_uri = get_websocket_uri(testnet=True)
-    serverlist = serverlist.split(',')
-
+    #serverlist = serverlist.split(',')
     global neturl
     neturl = _config['BLOCKBOOK_NETURL']
     global api_url
@@ -2648,19 +2646,20 @@ def initiate_process():
     global tokenapi_sse_url
     tokenapi_sse_url = _config['TOKENAPI_SSE_URL']
     global API_VERIFY
-    API_VERIFY = _config['API_VERIFY']
-    if API_VERIFY == 'False':
-        API_VERIFY = False
-    elif API_VERIFY == 'True':
-        API_VERIFY = True
+    if 'API_VERIFY' in _config:
+        if isinstance(_config['API_VERIFY'], bool):
+            API_VERIFY = _config['API_VERIFY']
+        elif isinstance(_config['API_VERIFY'], str):
+            API_VERIFY = False if _config['API_VERIFY'] == 'False' else True
+        else:
+            API_VERIFY = bool(_config['API_VERIFY'])
     else:
         API_VERIFY = True
 
-
     global IGNORE_BLOCK_LIST #, IGNORE_TRANSACTION_LIST
-    IGNORE_BLOCK_LIST = _config['IGNORE_BLOCK_LIST'].split(',')
-    IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]
-    #IGNORE_TRANSACTION_LIST = _config['IGNORE_TRANSACTION_LIST'].split(',')
+    IGNORE_BLOCK_LIST = _config['IGNORE_BLOCK_LIST']
+    #IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]
+    #IGNORE_TRANSACTION_LIST = _config['IGNORE_TRANSACTION_LIST']
 
 def start_backend_process(config, reset = False):
     global _config

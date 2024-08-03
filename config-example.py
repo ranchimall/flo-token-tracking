@@ -21,7 +21,7 @@ BLOCKBOOK_NETURL = "https://blockbook.ranchimall.net/"
 TOKENAPI_SSE_URL = "https://ranchimallflo.duckdns.org/"
 MAINNET_BLOCKBOOK_SERVER_LIST = ["https://blockbook.ranchimall.net/"]
 TESTNET_BLOCKBOOK_SERVER_LIST = ["https://blockbook-testnet.ranchimall.net/"]
-IGNORE_BLOCK_LIST = 902446
+IGNORE_BLOCK_LIST = [902446]
 #IGNORE_TRANSACTION_LIST = "b4ac4ddb51188b28b39bcb3aa31357d5bfe562c21e8aaf8dde0ec560fc893174"
 
 """?NOT USED?

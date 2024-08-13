@@ -589,6 +589,7 @@ def processBlocksInBatch(startIndex, stopIndex, batchsize = BLOCK_SYNC_BATCHSIZE
         for j in range(batchsize):
             if (i_index <= stopIndex) and (i_index not in IGNORE_BLOCK_LIST):
                 threads[j] = threading.Thread(target=fetchDataAndStore, args=(i_index, j))
+                threads[j].start()
             i_index += 1 # increment blockindex
 
         # wait for all threads in the batch to complete

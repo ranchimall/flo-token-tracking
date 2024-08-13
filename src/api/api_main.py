@@ -19,12 +19,15 @@ from operator import itemgetter
 import pdb
 import ast
 import time
+from src.flags import is_backend_ready
 
 app = Quart(__name__)
 app.clients = set()
 app = cors(app, allow_origin="*")
 
 INTERNAL_ERROR = "Unable to process request, try again later"
+BACKEND_NOT_READY_ERROR = "Server is still syncing, try again later!"
+BACKEND_NOT_READY_WARNING = "Server is still syncing, data may not be final"
 
 # Global values and configg
 internalTransactionTypes = [ 'tokenswapDepositSettlement', 'tokenswapParticipationSettlement', 'smartContractDepositReturn']
@@ -675,6 +678,8 @@ async def broadcastTx(raw_transaction_hash):
 # FLO TOKEN APIs
 @app.route('/api/v1.0/getTokenList', methods=['GET'])
 async def getTokenList():
+    if not is_backend_ready():
+        return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
     try:
         filelist = []
         for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
@@ -698,7 +703,10 @@ async def getTokenInfo():
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
         else:
-            return jsonify(result='error', description='token doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='token doesn\'t exist')
         c.execute('SELECT * FROM transactionHistory WHERE id=1')
         incorporationRow = c.fetchall()[0]
         c.execute('SELECT COUNT (DISTINCT address) FROM activeTable')
@@ -719,8 +727,11 @@ async def getTokenInfo():
             tempdict['blockHash'] = item[3]
             tempdict['transactionHash'] = item[4]
             associatedContractList.append(tempdict)
-
-        return jsonify(result='ok', token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList)
+        
+        if not is_backend_ready():
+            return jsonify(result='ok', token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList, warning=BACKEND_NOT_READY_WARNING)
+        else:
+            return jsonify(result='ok', token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList)
 
     except Exception as e:
         print("getTokenInfo:", e)
@@ -744,7 +755,10 @@ async def getTokenTransactions():
             conn.row_factory = sqlite3.Row
             c = conn.cursor()
         else:
-            return jsonify(result='error', description='token doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='token doesn\'t exist')
         
         if senderFloAddress and not destFloAddress:
             if limit is None:
@@ -776,7 +790,10 @@ async def getTokenTransactions():
             transactions_object['transactionDetails'] = update_transaction_confirmations(transactions_object['transactionDetails'])
             transactions_object['parsedFloData'] = json.loads(row[1])
             rowarray_list[transactions_object['transactionDetails']['txid']] = transactions_object
-        return jsonify(result='ok', token=token, transactions=rowarray_list)
+        if not is_backend_ready():
+            return jsonify(result='ok', token=token, transactions=rowarray_list, warning=BACKEND_NOT_READY_WARNING)
+        else:
+            return jsonify(result='ok', token=token, transactions=rowarray_list)
 
     except Exception as e:
         print("getTokenTransactions:", e)
@@ -795,7 +812,10 @@ async def getTokenBalances():
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
         else:
-            return jsonify(result='error', description='token doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='token doesn\'t exist')
         c.execute('SELECT address,SUM(transferBalance) FROM activeTable GROUP BY address')
         addressBalances = c.fetchall()
         
@@ -803,8 +823,12 @@ async def getTokenBalances():
 
         for address in addressBalances:
             returnList[address[0]] = address[1]
+    
+        if not is_backend_ready():
+            return jsonify(result='ok', token=token, balances=returnList, warning=BACKEND_NOT_READY_WARNING)
+        else:
+            return jsonify(result='ok', token=token, balances=returnList)
 
-        return jsonify(result='ok', token=token, balances=returnList)
     except Exception as e:
         print("getTokenBalances:", e)
         return jsonify(result='error', description=INTERNAL_ERROR)
@@ -844,7 +868,10 @@ async def getFloAddressInfo():
                         detailList[token] = tempdict
             else:
                 # Address is not associated with any token
-                return jsonify(result='error', description='FLO address is not associated with any tokens')
+                if not is_backend_ready():
+                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                else:
+                    return jsonify(result='error', description='FLO address is not associated with any tokens')
 
             if len(incorporatedContracts) != 0:
                 incorporatedSmartContracts = []
@@ -859,10 +886,13 @@ async def getFloAddressInfo():
                     tempdict['blockNumber'] = contract[5]
                     tempdict['blockHash'] = contract[6]
                     incorporatedSmartContracts.append(tempdict)
-                
+            else:
+                incorporatedSmartContracts = None
+
+            if not is_backend_ready():
                 return jsonify(result='ok', floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=incorporatedContracts)
             else:
-                return jsonify(result='ok', floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=None)
+                return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=incorporatedContracts)
 
     except Exception as e:
         print("getFloAddressInfo:", e)
@@ -901,24 +931,35 @@ async def getAddressBalance():
                             tempdict['balance'] = balance
                             tempdict['token'] = token
                             detailList[token] = tempdict
-
-                    return jsonify(result='ok', floAddress=floAddress, floAddressBalances=detailList)
+                    if not is_backend_ready():
+                        return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances=detailList)
+                    else:
+                        return jsonify(result='ok', floAddress=floAddress, floAddressBalances=detailList)
 
                 else:
                     # Address is not associated with any token
-                    return jsonify(result='error', description='FLO address is not associated with any tokens')
+                    if not is_backend_ready():
+                        return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                    else:
+                        return jsonify(result='error', description='FLO address is not associated with any tokens')
         else:
             dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
             else:
-                return jsonify(result='error', description='token doesn\'t exist')
+                if not is_backend_ready():
+                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                else:
+                    return jsonify(result='error', description='token doesn\'t exist')
             c.execute(
                 'SELECT SUM(transferBalance) FROM activeTable WHERE address="{}"'.format(floAddress))
             balance = c.fetchall()[0][0]
             conn.close()
-            return jsonify(result='ok', token=token, floAddress=floAddress, balance=balance)
+            if not is_backend_ready():
+                jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, token=token, floAddress=floAddress, balance=balance)
+            else:
+                return jsonify(result='ok', token=token, floAddress=floAddress, balance=balance)
 
     except Exception as e:
         print("getAddressBalance:", e)
@@ -947,7 +988,10 @@ async def getFloAddressTransactions():
             if os.path.exists(dblocation):
                 tokenNames = [[str(token), ]]
             else:
-                return jsonify(result='error', description='token doesn\'t exist')
+                if not is_backend_ready():
+                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                else:
+                    return jsonify(result='error', description='token doesn\'t exist')
             
         if len(tokenNames) != 0:
             allTransactionList = {}
@@ -973,11 +1017,20 @@ async def getFloAddressTransactions():
                         allTransactionList[transactions_object['transactionDetails']['txid']] = transactions_object
 
             if token is None:
-                return jsonify(result='ok', floAddress=floAddress, transactions=allTransactionList)
+                if not is_backend_ready():
+                    return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, transactions=allTransactionList)
+                else:
+                    return jsonify(result='ok', floAddress=floAddress, transactions=allTransactionList)
             else:
-                return jsonify(result='ok', floAddress=floAddress, transactions=allTransactionList, token=token)
+                if not is_backend_ready():
+                    return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, transactions=allTransactionList, token=token)
+                else:
+                    return jsonify(result='ok', floAddress=floAddress, transactions=allTransactionList, token=token)
         else:
-            return jsonify(result='error', description='No token transactions present present on this address')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='No token transactions present present on this address')
 
     except Exception as e:
         print("getFloAddressTransactions:", e)
@@ -1076,7 +1129,10 @@ async def getContractList():
 
                 contractList.append(contractDict)
         
-        return jsonify(smartContracts=contractList, result='ok')
+        if not is_backend_ready():
+            return jsonify(smartContracts=contractList, result='ok', warning=BACKEND_NOT_READY_WARNING)
+        else:
+            return jsonify(smartContracts=contractList, result='ok')
 
 
     except Exception as e:
@@ -1177,11 +1233,16 @@ async def getContractInfo():
 
                     else:
                         return jsonify(result='error', description='There is more than 1 trigger in the database for the smart contract. Please check your code, this shouldnt happen')
-            
-            return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, contractInfo=returnval)
+            if not is_backend_ready():
+                return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractInfo=returnval)
+            else:
+                return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, contractInfo=returnval)
 
         else:
-            return jsonify(result='error', details='Smart Contract with the given name doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', details='Smart Contract with the given name doesn\'t exist')
 
     except Exception as e:
         print("getContractInfo:", e)
@@ -1264,10 +1325,15 @@ async def getcontractparticipants():
                                             'swapAmount': row[7]
                                         }
                 conn.close()
-            
-            return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, participantInfo=returnval)
+            if not is_backend_ready():
+                return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, participantInfo=returnval)
+            else:
+                return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, participantInfo=returnval)
         else:
-            return jsonify(result='error', description='Smart Contract with the given name doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='Smart Contract with the given name doesn\'t exist')
 
     except Exception as e:
         print("getcontractparticipants:", e)
@@ -1469,10 +1535,16 @@ async def getParticipantDetails():
 
                         participationDetailsList.append(detailsDict)
                             
-                return jsonify(result='ok', floAddress=floAddress, type='participant', participatedContracts=participationDetailsList)
+                if not is_backend_ready():
+                    return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, type='participant', participatedContracts=participationDetailsList)
+                else:
+                    return jsonify(result='ok', floAddress=floAddress, type='participant', participatedContracts=participationDetailsList)
 
             else:
-                return jsonify(result='error', description='Address hasn\'t participated in any other contract')
+                if not is_backend_ready():
+                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                else:
+                    return jsonify(result='error', description='Address hasn\'t participated in any other contract')
         else:
             return jsonify(result='error', description='System error. System db is missing')
 
@@ -1512,10 +1584,16 @@ async def getsmartcontracttransactions():
                 transactions_object['parsedFloData'] = json.loads(item[1])
                 returnval[transactions_object['transactionDetails']['txid']] = transactions_object
 
-            return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, contractTransactions=returnval)
+            if not is_backend_ready():
+                return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractTransactions=returnval)
+            else:
+                return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, contractTransactions=returnval)
 
         else:
-            return jsonify(result='error', description='Smart Contract with the given name doesn\'t exist')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='Smart Contract with the given name doesn\'t exist')
 
     except Exception as e:
         print("getParticipantDetails:", e)
@@ -1530,7 +1608,10 @@ async def getblockdetails(blockdetail):
             blockJson = json.loads(blockJson[0][0])
             return jsonify(result='ok', blockDetails=blockJson)
         else:
-            return jsonify(result='error', description='Block doesn\'t exist in database')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='Block doesn\'t exist in database')
     except Exception as e:
         print("getblockdetails:", e)
         return jsonify(result='error', description=INTERNAL_ERROR)
@@ -1547,7 +1628,10 @@ async def gettransactiondetails(transactionHash):
 
             return jsonify(parsedFloData=parseResult, transactionDetails=transactionJson, transactionHash=transactionHash, result='ok')
         else:
-            return jsonify(result='error', description='Transaction doesn\'t exist in database')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='Transaction doesn\'t exist in database')
     except Exception as e:
         print("gettransactiondetails:", e)
         return jsonify(result='error', description=INTERNAL_ERROR)
@@ -1594,7 +1678,10 @@ async def getLatestTransactionDetails():
                 tx_parsed_details['parsedFloData']['transactionType'] = item[4]
                 tx_parsed_details['transactionDetails']['blockheight'] = int(item[2])
                 tempdict[json.loads(item[3])['txid']] = tx_parsed_details
-        return jsonify(result='ok', latestTransactions=tempdict)
+        if not is_backend_ready():
+            return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, latestTransactions=tempdict)
+        else:
+            return jsonify(result='ok', latestTransactions=tempdict)
     except Exception as e:
         print("getLatestTransactionDetails:", e)
         return jsonify(result='error', description=INTERNAL_ERROR)
@@ -1622,7 +1709,10 @@ async def getLatestBlockDetails():
         tempdict = {}
         for idx, item in enumerate(latestBlocks):
             tempdict[json.loads(item[3])['hash']] = json.loads(item[3])
-        return jsonify(result='ok', latestBlocks=tempdict)
+        if not is_backend_ready():
+            return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, latestBlocks=tempdict)
+        else:
+            return jsonify(result='ok', latestBlocks=tempdict)
 
     except Exception as e:
         print("getsmartcontracttransactions:", e)
@@ -1648,7 +1738,10 @@ async def getblocktransactions(blockdetail):
                 }
             return jsonify(result='ok', transactions=blocktxs, blockKeyword=blockdetail)
         else:
-            return jsonify(result='error', description='Block doesn\'t exist in database')
+            if not is_backend_ready():
+                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            else:
+                return jsonify(result='error', description='Block doesn\'t exist in database')
 
 
     except Exception as e:
@@ -1723,7 +1816,10 @@ async def getTokenSmartContractList():
                 contractDict['closeDate'] = contract[11]
             contractList.append(contractDict)
 
-        return jsonify(tokens=filelist, smartContracts=contractList, result='ok')
+        if not is_backend_ready():
+            return jsonify(tokens=filelist, warning=BACKEND_NOT_READY_WARNING, smartContracts=contractList, result='ok')
+        else:
+            return jsonify(tokens=filelist, smartContracts=contractList, result='ok')
     except Exception as e:
         print("getTokenSmartContractList:", e)
         return jsonify(result='error', description=INTERNAL_ERROR)
@@ -1752,12 +1848,14 @@ async def info():
         validatedBlockCount = c.execute('SELECT COUNT(distinct blockNumber) FROM latestBlocks').fetchall()[0][0]
         validatedTransactionCount = c.execute('SELECT COUNT(distinct transactionHash) FROM latestTransactions').fetchall()[0][0]
         conn.close()
-        
-        return jsonify(systemAddressCount=tokenAddressCount, systemBlockCount=validatedBlockCount, systemTransactionCount=validatedTransactionCount, systemSmartContractCount=contractCount, systemTokenCount=tokenCount, lastscannedblock=lastscannedblock), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, systemAddressCount=tokenAddressCount, systemBlockCount=validatedBlockCount, systemTransactionCount=validatedTransactionCount, systemSmartContractCount=contractCount, systemTokenCount=tokenCount, lastscannedblock=lastscannedblock), 206
+        else:
+            return jsonify(systemAddressCount=tokenAddressCount, systemBlockCount=validatedBlockCount, systemTransactionCount=validatedTransactionCount, systemSmartContractCount=contractCount, systemTokenCount=tokenCount, lastscannedblock=lastscannedblock), 200
 
     except Exception as e:
         print("info:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/broadcastTx/<raw_transaction_hash>')
@@ -1769,7 +1867,7 @@ async def broadcastTx_v2(raw_transaction_hash):
 
     except Exception as e:
         print("broadcastTx_v2:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 # FLO TOKEN APIs
 @app.route('/api/v2/tokenList', methods=['GET'])
@@ -1779,10 +1877,13 @@ async def tokenList():
         for item in os.listdir(os.path.join(DATA_PATH, 'tokens')):
             if os.path.isfile(os.path.join(DATA_PATH, 'tokens', item)):
                 filelist.append(item[:-3])
-        return jsonify(tokens=filelist), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, tokens=filelist), 206
+        else:
+            return jsonify(tokens=filelist), 200
     except Exception as e:
         print("tokenList:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
 
 
 
@@ -1798,7 +1899,10 @@ async def tokenInfo(token):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
         else:
-            return jsonify(description="Token doesn't exist"), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description="Token doesn't exist"), 404
         c.execute('SELECT * FROM transactionHistory WHERE id=1')
         incorporationRow = c.fetchall()[0]
         c.execute('SELECT COUNT (DISTINCT address) FROM activeTable')
@@ -1820,11 +1924,14 @@ async def tokenInfo(token):
             tempdict['transactionHash'] = item[4]
             associatedContractList.append(tempdict)
 
-        return jsonify(token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList), 200 
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList), 206 
+        else:
+            return jsonify(token=token, incorporationAddress=incorporationRow[1], tokenSupply=incorporationRow[3], time=incorporationRow[6], blockchainReference=incorporationRow[7], activeAddress_no=numberOf_distinctAddresses, totalTransactions=numberOf_transactions, associatedSmartContracts=associatedContractList), 200 
 
     except Exception as e:
         print("tokenInfo:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/tokenTransactions/<token>', methods=['GET'])
@@ -1860,13 +1967,19 @@ async def tokenTransactions(token):
         if os.path.isfile(filelocation):
             transactionJsonData = fetch_token_transactions(token, senderFloAddress, destFloAddress, limit, use_AND)
             sortedFormattedTransactions = sort_transactions(transactionJsonData)
-            return jsonify(token=token, transactions=sortedFormattedTransactions), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, token=token, transactions=sortedFormattedTransactions), 206
+            else:
+                return jsonify(token=token, transactions=sortedFormattedTransactions), 200
         else:
-            return jsonify(description='Token with the given name doesn\'t exist'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Token with the given name doesn\'t exist'), 404
 
     except Exception as e:
         print("tokenTransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/tokenBalances/<token>', methods=['GET'])
@@ -1880,19 +1993,25 @@ async def tokenBalances(token):
             conn = sqlite3.connect(dblocation)
             c = conn.cursor()
         else:
-            return jsonify(description="Token doesn't exist"), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description="Token doesn't exist"), 404
         c.execute('SELECT address,SUM(transferBalance) FROM activeTable GROUP BY address')
         addressBalances = c.fetchall()
         returnList = {}
         for address in addressBalances:
             returnList[address[0]] = address[1]
 
-        return jsonify(token=token, balances=returnList), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, token=token, balances=returnList), 206
+        else:
+            return jsonify(token=token, balances=returnList), 200
 
 
     except Exception as e:
         print("tokenBalances:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 # FLO Address APIs
 @app.route('/api/v2/floAddressInfo/<floAddress>', methods=['GET'])
@@ -1946,11 +2065,14 @@ async def floAddressInfo(floAddress):
                     tempdict['blockHash'] = contract[6]
                     incorporatedSmartContracts.append(tempdict)
                 
-            return jsonify(floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=incorporatedSmartContracts), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=incorporatedSmartContracts), 206
+            else:
+                return jsonify(floAddress=floAddress, floAddressBalances=detailList, incorporatedSmartContracts=incorporatedSmartContracts), 200
 
     except Exception as e:
         print("floAddressInfo:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/floAddressBalance/<floAddress>', methods=['GET'])
@@ -1985,25 +2107,37 @@ async def floAddressBalance(floAddress):
                             tempdict['balance'] = balance
                             tempdict['token'] = token
                             detailList[token] = tempdict
-                    return jsonify(floAddress=floAddress, floAddressBalances=detailList), 200
+                    if not is_backend_ready():
+                        return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances=detailList), 206
+                    else:
+                        return jsonify(floAddress=floAddress, floAddressBalances=detailList), 200
                 else:
                     # Address is not associated with any token
-                    return jsonify(floAddress=floAddress, floAddressBalances={}), 200
+                    if not is_backend_ready():
+                        return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances={}), 206
+                    else:
+                        return jsonify(floAddress=floAddress, floAddressBalances={}), 200
         else:
             dblocation = DATA_PATH + '/tokens/' + str(token) + '.db'
             if os.path.exists(dblocation):
                 conn = sqlite3.connect(dblocation)
                 c = conn.cursor()
             else:
-                return jsonify(description="Token doesn't exist"), 404
+                if not is_backend_ready():
+                    return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+                else:
+                    return jsonify(description="Token doesn't exist"), 404
             c.execute(f'SELECT SUM(transferBalance) FROM activeTable WHERE address="{floAddress}"')
             balance = c.fetchall()[0][0]
             conn.close()
-            return jsonify(floAddress=floAddress, token=token, balance=balance), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, token=token, balance=balance), 206
+            else:
+                return jsonify(floAddress=floAddress, token=token, balance=balance), 200
 
     except Exception as e:
         print("floAddressBalance:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/floAddressTransactions/<floAddress>', methods=['GET'])
@@ -2030,7 +2164,10 @@ async def floAddressTransactions(floAddress):
             if os.path.exists(dblocation):
                 tokenNames = [[str(token), ]]
             else:
-                return jsonify(description="Token doesn't exist"), 404
+                if not is_backend_ready():
+                    return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+                else:
+                    return jsonify(description="Token doesn't exist"), 404
             
         if len(tokenNames) != 0:
             allTransactionList = []
@@ -2041,15 +2178,24 @@ async def floAddressTransactions(floAddress):
             
             sortedFormattedTransactions = sort_transactions(allTransactionList)
             if token is None:
-                return jsonify(floAddress=floAddress, transactions=sortedFormattedTransactions), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, transactions=sortedFormattedTransactions), 206
+                else:
+                    return jsonify(floAddress=floAddress, transactions=sortedFormattedTransactions), 200
             else:
-                return jsonify(floAddress=floAddress, transactions=sortedFormattedTransactions, token=token), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, transactions=sortedFormattedTransactions, token=token), 206
+                else:
+                    return jsonify(floAddress=floAddress, transactions=sortedFormattedTransactions, token=token), 200
         else:
-            return jsonify(floAddress=floAddress, transactions=[], token=token), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, transactions=[], token=token), 206
+            else:
+                return jsonify(floAddress=floAddress, transactions=[], token=token), 200
 
     except Exception as e:
         print("floAddressTransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 # SMART CONTRACT APIs
@@ -2076,12 +2222,15 @@ async def getContractList_v2():
 
         committeeAddressList = refresh_committee_list(APP_ADMIN, apiUrl, int(time.time()))
 
-        return jsonify(smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 206
+        else:
+            return jsonify(smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 200
 
 
     except Exception as e:
         print("getContractList_v2:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 @app.route('/api/v2/smartContractInfo', methods=['GET'])
 async def getContractInfo_v2():
@@ -2157,13 +2306,19 @@ async def getContractInfo_v2():
                             returnval['closeDate'] = status_time_info[3]
                 returnval['contractSubtype'] = 'time-trigger'
 
-            return jsonify(contractName=contractName, contractAddress=contractAddress, contractInfo=returnval), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractInfo=returnval), 206
+            else:
+                return jsonify(contractName=contractName, contractAddress=contractAddress, contractInfo=returnval), 200
         else:
-            return jsonify(details="Smart Contract with the given name doesn't exist"), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(details="Smart Contract with the given name doesn't exist"), 404
 
     except Exception as e:
         print("getContractInfo_v2:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/smartContractParticipants', methods=['GET'])
@@ -2213,7 +2368,10 @@ async def getcontractparticipants_v2():
                     for row in result:
                         participation = {'participantFloAddress': row[1], 'tokenAmount': row[2], 'userChoice': row[3], 'transactionHash': row[4]}
                         returnval.append(participation)
-                return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='external-trigger', participantInfo=returnval), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='external-trigger', participantInfo=returnval), 206
+                else:
+                    return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='external-trigger', participantInfo=returnval), 200
             elif 'payeeAddress' in contractStructure:
                 # contract is of the type internal trigger
                 c.execute('SELECT id, participantAddress, tokenAmount, userChoice, transactionHash FROM contractparticipants')
@@ -2223,7 +2381,10 @@ async def getcontractparticipants_v2():
                 for row in result:
                     participation = {'participantFloAddress': row[1], 'tokenAmount': row[2], 'transactionHash': row[4]}
                     returnval.append(participation)
-                return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='time-trigger', participantInfo=returnval), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='time-trigger', participantInfo=returnval), 206
+                else:
+                    return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype='time-trigger', participantInfo=returnval), 200
             elif contractStructure['contractType'] == 'continuos-event' and contractStructure['subtype'] == 'tokenswap':
                 c.execute('SELECT * FROM contractparticipants')
                 contract_participants = c.fetchall()
@@ -2240,13 +2401,19 @@ async def getcontractparticipants_v2():
                                         }
                     returnval.append(participation)
                 conn.close()
-                return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype=contractStructure['subtype'], participantInfo=returnval), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype=contractStructure['subtype'], participantInfo=returnval), 206
+                else:
+                    return jsonify(contractName=contractName, contractAddress=contractAddress, contractType=contractStructure['contractType'], contractSubtype=contractStructure['subtype'], participantInfo=returnval), 200
         else:
-            return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
 
     except Exception as e:
         print("getcontractparticipants_v2:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/participantDetails/<floAddress>', methods=['GET'])
@@ -2399,15 +2566,21 @@ async def participantDetails(floAddress):
                                     detailsDict['userChoice'] = result[0][0]
                         participationDetailsList.append(detailsDict)
                             
-                return jsonify(floAddress=floAddress, type='participant', participatedContracts=participationDetailsList), 200
+                if not is_backend_ready():
+                    return jsonify(warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, type='participant', participatedContracts=participationDetailsList), 206
+                else:
+                    return jsonify(floAddress=floAddress, type='participant', participatedContracts=participationDetailsList), 200
             else:
-                return jsonify(description="Address hasn't participated in any other contract"), 404
+                if not is_backend_ready():
+                    return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+                else:
+                    return jsonify(description="Address hasn't participated in any other contract"), 404
         else:
             return jsonify(description='System error. System.db is missing. This is unusual, please report on https://github.com/ranchimall/ranchimallflo-api'), 500
 
     except Exception as e:
         print("participantDetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/smartContractTransactions', methods=['GET'])
@@ -2439,13 +2612,19 @@ async def smartcontracttransactions():
             # Make db connection and fetch data
             transactionJsonData = fetch_contract_transactions(contractName, contractAddress, _from, to)
             transactionJsonData = sort_transactions(transactionJsonData)
-            return jsonify(contractName=contractName, contractAddress=contractAddress, contractTransactions=transactionJsonData), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, contractTransactions=transactionJsonData), 206
+            else:
+                return jsonify(contractName=contractName, contractAddress=contractAddress, contractTransactions=transactionJsonData), 200
         else:
-            return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
 
     except Exception as e:
         print("smartcontracttransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 # todo - add options to only ask for active/consumed/returned deposits
@@ -2492,14 +2671,20 @@ async def smartcontractdeposits():
                 deposit_info.append(obj)
             c.execute('SELECT SUM(depositBalance) AS totalDepositBalance FROM contractdeposits c1 WHERE id = ( SELECT MAX(id) FROM contractdeposits c2 WHERE c1.transactionHash = c2.transactionHash);')
             currentDepositBalance = c.fetchall()[0][0]
-            return jsonify(currentDepositBalance=currentDepositBalance, depositInfo=deposit_info), 200
+            if not is_backend_ready():
+                return jsonify(warning=BACKEND_NOT_READY_WARNING, currentDepositBalance=currentDepositBalance, depositInfo=deposit_info), 206
+            else:
+                return jsonify(currentDepositBalance=currentDepositBalance, depositInfo=deposit_info), 200
         else:
-            return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Smart Contract with the given name doesn\'t exist'), 404
 
 
     except Exception as e:
         print("smartcontractdeposits:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 @app.route('/api/v2/blockDetails/<blockHash>', methods=['GET'])
 async def blockdetails(blockHash):
@@ -2510,10 +2695,13 @@ async def blockdetails(blockHash):
             blockJson = json.loads(blockJson[0][0])
             return jsonify(blockDetails=blockJson), 200
         else:
-            return jsonify(description='Block doesn\'t exist in database'), 404    
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Block doesn\'t exist in database'), 404    
     except Exception as e:
         print("blockdetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
 
 
 
@@ -2612,11 +2800,14 @@ async def transactiondetails1(transactionHash):
             mergeTx['operationDetails'] = operationDetails
             return jsonify(mergeTx), 200
         else:
-            return jsonify(description='Transaction doesn\'t exist in database'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Transaction doesn\'t exist in database'), 404
 
     except Exception as e:
         print("transactiondetails1:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/latestTransactionDetails', methods=['GET'])
@@ -2652,10 +2843,13 @@ async def latestTransactionDetails():
             # TODO (CRITICAL): Write conditions to include and filter on chain and offchain transactions
             tx_parsed_details['onChain'] = True
             tx_list.append(tx_parsed_details)
-        return jsonify(latestTransactions=tx_list), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, latestTransactions=tx_list), 206
+        else:
+            return jsonify(latestTransactions=tx_list), 200
     except Exception as e:
         print("latestTransactionDetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 
@@ -2684,11 +2878,14 @@ async def latestBlockDetails():
         for idx, item in enumerate(latestBlocks):
             templst.append(json.loads(item[0]))
             
-        return jsonify(latestBlocks=templst), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, latestBlocks=templst), 206
+        else:
+            return jsonify(latestBlocks=templst), 200
 
     except Exception as e:
         print("latestBlockDetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/blockTransactions/<blockHash>', methods=['GET'])
@@ -2709,12 +2906,15 @@ async def blocktransactions(blockHash):
                 #blocktxs['onChain'] = True
             return jsonify(transactions=blocktxs, blockKeyword=blockHash), 200
         else:
-            return jsonify(description='Block doesn\'t exist in database'), 404
+            if not is_backend_ready():
+                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
+            else:
+                return jsonify(description='Block doesn\'t exist in database'), 404
 
 
     except Exception as e:
         print("blocktransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 @app.route('/api/v2/categoriseString/<urlstring>')
 async def categoriseString_v2(urlstring):
@@ -2748,7 +2948,7 @@ async def categoriseString_v2(urlstring):
 
     except Exception as e:
         print("categoriseString_v2:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 
 @app.route('/api/v2/tokenSmartContractList', methods=['GET'])
@@ -2778,12 +2978,15 @@ async def tokenSmartContractList():
         conn.close()
 
         committeeAddressList = refresh_committee_list(APP_ADMIN, apiUrl, int(time.time()))
-        return jsonify(tokens=filelist, smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 200
+        if not is_backend_ready():
+            return jsonify(warning=BACKEND_NOT_READY_WARNING, tokens=filelist, smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 206
+        else:
+            return jsonify(tokens=filelist, smartContracts=smart_contracts_morphed, smartContractCommittee=committeeAddressList), 200
 
 
     except Exception as e:
         print("tokenSmartContractList:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
     
 class ServerSentEvent:
     def __init__(
@@ -2850,7 +3053,7 @@ async def priceData():
         return jsonify(prices=prices), 200    
     except Exception as e:
         print("priceData:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+        return jsonify(description=INTERNAL_ERROR), 500
 
 
 

@@ -24,6 +24,7 @@ import websockets
 from decimal import Decimal
 import pdb
 from src.backend.util_rollback import rollback_to_block
+from src.flags import set_backend_start, set_backend_stop, set_backend_sync_start, set_backend_sync_stop, set_backend_ready, set_backend_not_ready, is_backend_ready, is_backend_syncing
 
 
 RETRY_TIMEOUT_LONG = 30 * 60 # 30 mins
@@ -1110,6 +1111,7 @@ def check_for_reorg(backtrack_count = BACK_TRACK_BLOCKS):
 
     # rollback if needed
     if block_number != latest_block:
+        set_backend_not_ready()
         stop_sync_loop() # stop the syncing process
         rollback_to_block(block_number)
     
@@ -2527,6 +2529,7 @@ def scanBlockchain(startup = False):
     #    processBlock(blockindex=blockindex) 
 
     # At this point the script has updated to the latest block
+    set_backend_ready()
     # Now we connect to Blockbook's websocket API to get information about the latest blocks
     if not startup and not isactive_sync_loop():
         start_sync_loop()
@@ -2567,11 +2570,10 @@ def get_websocket_uri(testnet=False):
 async def connect_to_websocket(uri):
 
     # global flag to pass termination when needed
-    global _isactive_sync
-    _isactive_sync = True
+    set_backend_sync_start()
 
     while True:
-        if not _isactive_sync:
+        if not is_backend_syncing():
             return
         try:
             async with websockets.connect(uri) as websocket:
@@ -2582,7 +2584,7 @@ async def connect_to_websocket(uri):
                 }
                 await websocket.send(json.dumps(subscription_request))
                 while True:
-                    if not _isactive_sync:
+                    if not is_backend_syncing():
                         websocket.close()
                         return scanBlockchain()
                     response = await websocket.recv()
@@ -2598,7 +2600,7 @@ async def connect_to_websocket(uri):
                             # If this is the issue need to proceed forward only once blockbook has consolitated
                         
                         check_for_reorg()
-                        if not _isactive_sync: #if reorg happens, _isactive_sync becomes False as sync is closed
+                        if not is_backend_syncing(): #if reorg happens, is_backend_syncing() becomes False as sync is closed
                             websocket.close()
                             return scanBlockchain()
                         processBlock(blockindex=response['data']['height'], blockhash=response['data']['hash'])
@@ -2607,7 +2609,7 @@ async def connect_to_websocket(uri):
             logger.info(f"Connection error: {e}")
             # Add a delay before attempting to reconnect
             await asyncio.sleep(5)  # You can adjust the delay as needed
-            if not _isactive_sync:
+            if not is_backend_syncing():
                 return
             scanBlockchain()
 
@@ -2738,8 +2740,8 @@ def isactive_sync_loop():
         return False
 
 def stop_sync_loop():
-    global _sync_loop, _isactive_sync
-    _isactive_sync = False
+    set_backend_sync_stop()
+    global _sync_loop
     if (_sync_loop is not None) and _sync_loop.is_running():
         _sync_loop.stop()
     _sync_loop = None
@@ -2747,6 +2749,8 @@ def stop_sync_loop():
 def start_backend_process(config, reset = False):
     global _config
     _config = config
+    set_backend_start()
+    set_backend_not_ready()
     initiate_process()
     init_storage_if_not_exist(reset)
     # MAIN LOGIC STARTS

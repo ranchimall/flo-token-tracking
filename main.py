@@ -4,6 +4,7 @@ import threading
 from src.api.api_main import start_api_server
 from src.backend.backend_main import start_backend_process
 import config as config
+from flags import set_run_start
 
 DELAY_API_SERVER_START = 60 # 1 min
 
@@ -18,6 +19,7 @@ if __name__ == "__main__":
     
     # parse the config file into dict
     _config = convert_to_dict(config)
+    set_run_start()
     
     # start the backend process (token scanner). pass reset=True if --reset is in command-line args
     if "--reset" in sys.argv or "-r" in sys.argv:

@@ -30,7 +30,7 @@ from src.flags import set_backend_start, set_backend_stop, set_backend_sync_star
 RETRY_TIMEOUT_LONG = 30 * 60 # 30 mins
 RETRY_TIMEOUT_SHORT = 60 # 1 min
 DB_RETRY_TIMEOUT = 60 # 60 seconds
-BLOCK_SYNC_BATCHSIZE = 1000
+BLOCK_SYNC_BATCHSIZE = 1
 BACK_TRACK_BLOCKS = 1000
 
 def newMultiRequest(apicall):
@@ -1582,10 +1582,10 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                         query_data = contract_session.query(ContractDeposits.depositBalance).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
 
                         available_deposit_sum = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
-                        if available_deposit_sum==0 or available_deposit_sum[0][0] is None:
+                        if available_deposit_sum==0 or available_deposit_sum is None:
                             available_deposit_sum = 0
                         else:
-                            available_deposit_sum = float(available_deposit_sum[0][0])
+                            available_deposit_sum = float(available_deposit_sum)
                         
                         if available_deposit_sum >= swapAmount:
                             # accepting token transfer from participant to smart contract address 
@@ -1610,7 +1610,7 @@ def processTransaction(transaction_data, parsed_data, blockinfo):
                             for a_deposit in available_deposits:
                                 if a_deposit.depositBalance > remaining_amount:
                                     # accepting token transfer from the contract to depositor's address 
-                                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiply', remaining_amount, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiplication', remaining_amount, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
                                     if returnval == 0:
                                         logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
                                         return 0

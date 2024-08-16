@@ -88,5 +88,4 @@ for contract in contract_deposits:
 systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
 query = systemdb_session.query(TokenAddressMapping).filter(TokenAddressMapping.tokenAddress == 'contractAddress')
 results = query.all()
-pdb.set_trace()
 print('Lets investigate this now')

@@ -1,3 +1,5 @@
+# Master branch is based on Flosight, which we do not support now
+
 # FLO Token & Smart Contract System 
 [![Test flodata parsing](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml/badge.svg?branch=swap-statef-testing)](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml)
 

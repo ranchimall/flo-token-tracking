@@ -58,8 +58,12 @@ Docker-compatibility branch is needed right now because Docker image made for fl
       DATA_PATH = /home/production/deployed/ftt-blockbook-migration-rescan
       APP_ADMIN = FNcvkz9PZNZM3HcxM1XTrVL4tgivmCkHp9
       API_VERIFY = False
-    ```
+
+   ```
+
+4. Install pyflosetup.sh if dependency errors of any kind come. Give it execute permissions first `chmod +x pyflosetup.sh`, and then `./pyflosetup.sh`  
+   
     
-4. If running for the first time, run  `python3.7 tracktokens-smartcontracts.py --reset` otherwise run `python3.7 tracktokens-smartcontracts.py`
+5. If running for the first time, run  `python3.7 tracktokens-smartcontracts.py --reset` otherwise run `python3.7 tracktokens-smartcontracts.py`
 
 

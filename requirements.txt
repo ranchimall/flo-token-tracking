@@ -2,7 +2,7 @@ arrow==1.1.0
 bidict==0.21.2
 certifi==2022.12.7
 cffi==1.14.5
-requests==2.25.0
+requests==2.31.0
 chardet==3.0.4
 greenlet==1.1.0
 idna==2.10

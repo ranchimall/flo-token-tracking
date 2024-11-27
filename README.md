@@ -14,7 +14,7 @@
 ## Setup setps
 
 1. Setup the Python Virtual Environment first with atleast python3.7 at least. Look below for exact instructions
-2. Install setup.sh to install all dependencies. Give it execute permissions first `chmod +x pyflosetup.sh`, and then `./setup.sh` 
+2. Install setup.sh to install all dependencies. Give it execute permissions first `chmod +x setup.sh`, and then `./setup.sh` 
 3. Install MYSQL and create MySQL user and password
 4. Add all the data in confg.ini
 5. Then run the command as per one of the options below

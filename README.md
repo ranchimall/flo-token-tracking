@@ -1,3 +1,22 @@
+# Howto start the MYSQL version
+## MySQL commands to create a user
+1. CREATE USER 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' IDENTIFIED BY 'RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5';
+2. GRANT ALL PRIVILEGES ON `rm_%_db`.* TO 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' WITH GRANT OPTION;
+
+## Modify config.ini
+   ```
+   [MYSQL]
+   USERNAME = FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT
+   PASSWORD = RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5
+   HOST = localhost
+   DATABASE_PREFIX = rm
+   ```
+## How to run (setup the venv first)
+
+1. python3.7 tracktokens-smartcontracts.py --reset
+2. python3.7 tracktokens-smartcontracts.py --rebuild
+3. python3.7 tracktokens-smartcontracts.py --rebuild usd# tokenroom#
+
 # FLO Token & Smart Contract System 
 [![Test flodata parsing](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml/badge.svg?branch=swap-statef-testing)](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml)
 

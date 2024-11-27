@@ -1,23 +1,10 @@
 # Howto start the MYSQL version
-## MySQL commands to create a user
-1. CREATE USER 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' IDENTIFIED BY 'RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5';
-2. GRANT ALL PRIVILEGES ON `rm_%_db`.* TO 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' WITH GRANT OPTION;
 
-## Modify config.ini
-   ```
-   [MYSQL]
-   USERNAME = FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT
-   PASSWORD = RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5
-   HOST = localhost
-   DATABASE_PREFIX = rm
-   ```
 ## Setup setps
 
-1. Setup the Python Virtual Environment first with atleast python3.7 at least. Look below for exact instructions
-2. Install setup.sh to install all dependencies. Give it execute permissions first `chmod +x setup.sh`, and then `./setup.sh` 
-3. Install MYSQL and create MySQL user and password
-4. Add all the data in confg.ini
-5. Then run the command as per one of the options below
+1. Run setup.sh to install python3.7 virtual environment, install and configure MySQL if it does not exist, install all dependencies and then start the application.
+2. Give setup.sh execute permissions first `chmod +x setup.sh`, and then `./setup.sh` 
+
 
 ## How to run
 1. python3.7 tracktokens-smartcontracts.py 
@@ -167,4 +154,17 @@ When you are finished, deactivate the virtual environment to return to the base 
 bash
 
 deactivate
+
+## MySQL commands to create a user
+1. CREATE USER 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' IDENTIFIED BY 'RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5';
+2. GRANT ALL PRIVILEGES ON `rm_%_db`.* TO 'FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT'@'localhost' WITH GRANT OPTION;
+
+## Modify config.ini
+   ```
+   [MYSQL]
+   USERNAME = FUfB6cwSsGDbQpmA7Qs8zQJxU3HpwCdnjT
+   PASSWORD = RAcifrTM2V75ipy5MeLYaDU3UNcUXtrit933TGM5o7Yj2fs8XdP5
+   HOST = localhost
+   DATABASE_PREFIX = rm
+   ```
 

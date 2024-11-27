@@ -16,3 +16,4 @@ urllib3==1.26.5
 pyflo-lib==2.0.9 
 pymysql
 cryptography
+arduino

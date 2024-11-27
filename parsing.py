@@ -1021,241 +1021,169 @@ stream_handler.setFormatter(formatter)
 logger.addHandler(file_handler)
 logger.addHandler(stream_handler)
 
-def parse_flodata(text, blockinfo, net):
-    if net == 'testnet':
-        is_testnet = True
-    else:
-        is_testnet = False
-
-    if text == '':
+# Processing functions for each categorization
+def process_tokensystem_C(first_classification, processed_text, clean_text, stateF_mapping, is_testnet):
+    # Resolving conflict for 'tokensystem-C' 
+    tokenname = first_classification['wordlist'][0][:-1]
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", tokenname):
         return outputreturn('noise')
 
-    clean_text, processed_text = text_preprocessing(text)
-    # System state 
-    print("Processing stateF")
-    stateF_mapping = isStateF(processed_text) 
-    first_classification = firstclassification_rawstring(processed_text)
-    parsed_data = None 
+    isNFT = check_word_existence_instring('nft', processed_text)           
 
+    isInfinite = check_word_existence_instring('infinite-token', processed_text)
+    tokenamount = apply_rule1(extractAmount_rule_new, processed_text)
 
-    if first_classification['categorization'] == 'tokensystem-C':
-        # Resolving conflict for 'tokensystem-C' 
-        tokenname = first_classification['wordlist'][0][:-1]
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", tokenname):
-            return outputreturn('noise')
+    ## Cannot be NFT and normal token and infinite token. Find what are the conflicts 
+    # if its an NFT then tokenamount has to be integer and infinite keyword should not be present 
+    # if its a normal token then isNFT and isInfinite should be None/False and token amount has to be present 
+    # if its an infinite token then tokenamount should be None and isNFT should be None/False
+    # The supply of tokenAmount cannot be 0 
 
-        isNFT = check_word_existence_instring('nft', processed_text)           
-
-        isInfinite = check_word_existence_instring('infinite-token', processed_text)
-        tokenamount = apply_rule1(extractAmount_rule_new, processed_text)
-
-        ## Cannot be NFT and normal token and infinite token. Find what are the conflicts 
-        # if its an NFT then tokenamount has to be integer and infinite keyword should not be present 
-        # if its a normal token then isNFT and isInfinite should be None/False and token amount has to be present 
-        # if its an infinite token then tokenamount should be None and isNFT should be None/False
-        # The supply of tokenAmount cannot be 0 
-
-        ##################################################
-        
-        if (not tokenamount and not isInfinite) or (isNFT and not tokenamount.is_integer() and not isInfinite) or (isInfinite and tokenamount is not False and isNFT is not False) or (not isInfinite and tokenamount<=0):
-            return outputreturn('noise')
-        operation = apply_rule1(selectCategory, processed_text, send_category, create_category)
-        if operation == 'category1' and tokenamount is not None:
+    ##################################################
+    
+    if (not tokenamount and not isInfinite) or (isNFT and not tokenamount.is_integer() and not isInfinite) or (isInfinite and tokenamount is not False and isNFT is not False) or (not isInfinite and tokenamount<=0):
+        return outputreturn('noise')
+    operation = apply_rule1(selectCategory, processed_text, send_category, create_category)
+    if operation == 'category1' and tokenamount is not None:
+        if isNFT:
+            return outputreturn('nft_transfer',f"{processed_text}", f"{tokenname}", tokenamount, stateF_mapping)
+        else:
+            return outputreturn('token_transfer',f"{processed_text}", f"{tokenname}", tokenamount, stateF_mapping)
+    elif operation == 'category2':
+        if isInfinite:
+            return outputreturn('infinite_token_create',f"{processed_text}", f"{tokenname}", stateF_mapping)
+        else:
+            if tokenamount is None:
+                return outputreturn('noise')
             if isNFT:
-                return outputreturn('nft_transfer',f"{processed_text}", f"{tokenname}", tokenamount, stateF_mapping)
+                nft_hash = extract_NFT_hash(clean_text)
+                if nft_hash is False:
+                    return outputreturn('noise')
+                return outputreturn('nft_create',f"{processed_text}", f"{tokenname}", tokenamount, f"{nft_hash}", stateF_mapping)
             else:
-                return outputreturn('token_transfer',f"{processed_text}", f"{tokenname}", tokenamount, stateF_mapping)
-        elif operation == 'category2':
-            if isInfinite:
-                return outputreturn('infinite_token_create',f"{processed_text}", f"{tokenname}", stateF_mapping)
-            else:
-                if tokenamount is None:
-                    return outputreturn('noise')
-                if isNFT:
-                    nft_hash = extract_NFT_hash(clean_text)
-                    if nft_hash is False:
-                        return outputreturn('noise')
-                    return outputreturn('nft_create',f"{processed_text}", f"{tokenname}", tokenamount, f"{nft_hash}", stateF_mapping)
-                else:
-                    return outputreturn('token_incorporation',f"{processed_text}", f"{first_classification['wordlist'][0][:-1]}", tokenamount, stateF_mapping)
-        else:
-            return outputreturn('noise')
+                return outputreturn('token_incorporation',f"{processed_text}", f"{first_classification['wordlist'][0][:-1]}", tokenamount, stateF_mapping)
+    else:
+        return outputreturn('noise')
 
-    if first_classification['categorization'] == 'smart-contract-creation-C':
-        # Resolving conflict for 'smart-contract-creation-C'
-        operation = apply_rule1(selectCategory, processed_text, create_category, send_category+deposit_category)
-        if not operation:
-            return outputreturn('noise') 
 
-        contract_type = extract_special_character_word(first_classification['wordlist'],'*')
-        if not check_existence_of_keyword(['one-time-event'],[contract_type]):
-            return outputreturn('noise') 
+def process_smart_contract_creation_C(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet):
+    # Resolving conflict for 'smart-contract-creation-C'
+    operation = apply_rule1(selectCategory, processed_text, create_category, send_category+deposit_category)
+    if not operation:
+        return outputreturn('noise') 
 
-        contract_name = extract_special_character_word(first_classification['wordlist'],'@')
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
-            return outputreturn('noise') 
+    contract_type = extract_special_character_word(first_classification['wordlist'],'*')
+    if not check_existence_of_keyword(['one-time-event'],[contract_type]):
+        return outputreturn('noise') 
 
-        contract_token = extract_special_character_word(first_classification['wordlist'],'#')
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_token):
-            return outputreturn('noise') 
+    contract_name = extract_special_character_word(first_classification['wordlist'],'@')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
+        return outputreturn('noise') 
 
-        contract_address = extract_special_character_word(first_classification['wordlist'],'$')
-        contract_address = find_original_case(contract_address, clean_text)
-        if not check_flo_address(contract_address, is_testnet):
-            return outputreturn('noise') 
+    contract_token = extract_special_character_word(first_classification['wordlist'],'#')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_token):
+        return outputreturn('noise') 
 
-        contract_conditions = extract_contract_conditions(processed_text, contract_type, contract_token, blocktime=blockinfo['time'])
-        if contract_conditions == False or not resolve_incategory_conflict(contract_conditions,[['userchoices','payeeAddress']]):
-            return outputreturn('noise') 
-        else:
-            contractAmount = ''
-            if 'contractAmount' in contract_conditions.keys():
-                contractAmount = contract_conditions['contractAmount']
-                try:
-                    if float(contractAmount)<=0:
-                        return outputreturn('noise') 
-                except:
-                    return outputreturn('noise')
-            minimum_subscription_amount = ''
-            if 'minimumsubscriptionamount' in contract_conditions.keys():
-                minimum_subscription_amount = contract_conditions['minimumsubscriptionamount']
-                try:
-                    if float(minimum_subscription_amount)<=0:
-                        return outputreturn('noise')
-                except:
-                    return outputreturn('noise')
-            maximum_subscription_amount = ''
-            if 'maximumsubscriptionamount' in contract_conditions.keys():
-                maximum_subscription_amount = contract_conditions['maximumsubscriptionamount']
-                try:
-                    if float(maximum_subscription_amount)<=0:
-                        return outputreturn('noise')
-                except:
-                    return outputreturn('noise')
+    contract_address = extract_special_character_word(first_classification['wordlist'],'$')
+    contract_address = find_original_case(contract_address, clean_text)
+    if not check_flo_address(contract_address, is_testnet):
+        return outputreturn('noise') 
 
-            if 'userchoices' in contract_conditions.keys():
-                return outputreturn('one-time-event-userchoice-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", f"{contract_conditions['userchoices']}", f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
-            elif 'payeeAddress' in contract_conditions.keys():
-                contract_conditions['payeeAddress'] = find_word_index_fromstring(clean_text,contract_conditions['payeeAddress'])
-                
-                # check if colon exists in the payeeAddress string
-                if ':' in contract_conditions['payeeAddress']:
-                    colon_split = contract_conditions['payeeAddress'].split(':')
-                    if len(colon_split)%2 != 0:
-                        return outputreturn('noise')
-                    split_total = 0 
-                    payeeAddress_split_dictionary = {}
-                    for idx, item in enumerate(colon_split):
-                        if idx%2 == 0:
-                            # Check if floid 
-                            if not check_flo_address(item, is_testnet):
-                                return outputreturn('noise')
-                            # Add check to make sure payeeAddress is not contractAddress
-                            if contract_address == item:
-                                logger.debug('payeeAddress is same as contract address')
-                                return outputreturn('noise')
-                            
-                        if idx%2 == 1:
-                            # check if number
-                            try:
-                                item = float(item)
-                                if item <= 0:
-                                    return outputreturn('noise')
-                                payeeAddress_split_dictionary[colon_split[idx-1]] = item
-                                #split_total += item
-                                split_total = perform_decimal_operation('addition', split_total, item)
-                            except:
-                                return outputreturn('noise')
-                            
-                    if split_total != 100:
-                        return outputreturn('noise')
-                    else:
-                        contract_conditions['payeeAddress'] = payeeAddress_split_dictionary
-                        return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
-                else:  
-                    if not check_flo_address(contract_conditions['payeeAddress'], is_testnet):
-                        return outputreturn('noise')
-
-                    # Add check to make sure payeeAddress is not contractAddress
-                    if contract_address == contract_conditions['payeeAddress']:
-                        logger.debug('payeeAddress is same as contract address')
-                        return outputreturn('noise')
-                    
-                    contract_conditions['payeeAddress'] = {f"{contract_conditions['payeeAddress']}":100}
-                    return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
-
-    if first_classification['categorization'] == 'smart-contract-participation-deposit-C':
-        # either participation of one-time-event contract or 
-        operation = apply_rule1(select_category_reject, processed_text, send_category, deposit_category, create_category)
-        if not operation:
-            return outputreturn('noise')
-        else:
-            tokenname = first_classification['wordlist'][0][:-1]
-            if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", tokenname):
-                return outputreturn('noise')
-        
-            contract_name = extract_special_character_word(first_classification['wordlist'],'@')
-            if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
-                return outputreturn('noise')
-
-            contract_address = extract_special_character_word(first_classification['wordlist'],'$')
-            if contract_address is False:
-                contract_address = '' 
-            else:
-                contract_address = find_original_case(contract_address, clean_text)
-                if not check_flo_address(contract_address, is_testnet):
+    contract_conditions = extract_contract_conditions(processed_text, contract_type, contract_token, blocktime=blockinfo['time'])
+    if contract_conditions == False or not resolve_incategory_conflict(contract_conditions,[['userchoices','payeeAddress']]):
+        return outputreturn('noise') 
+    else:
+        contractAmount = ''
+        if 'contractAmount' in contract_conditions.keys():
+            contractAmount = contract_conditions['contractAmount']
+            try:
+                if float(contractAmount)<=0:
                     return outputreturn('noise') 
+            except:
+                return outputreturn('noise')
+        minimum_subscription_amount = ''
+        if 'minimumsubscriptionamount' in contract_conditions.keys():
+            minimum_subscription_amount = contract_conditions['minimumsubscriptionamount']
+            try:
+                if float(minimum_subscription_amount)<=0:
+                    return outputreturn('noise')
+            except:
+                return outputreturn('noise')
+        maximum_subscription_amount = ''
+        if 'maximumsubscriptionamount' in contract_conditions.keys():
+            maximum_subscription_amount = contract_conditions['maximumsubscriptionamount']
+            try:
+                if float(maximum_subscription_amount)<=0:
+                    return outputreturn('noise')
+            except:
+                return outputreturn('noise')
 
-            if operation == 'category1':
-                tokenamount = apply_rule1(extractAmount_rule_new1, processed_text, 'userchoice:', 'pre')
-                if not tokenamount:
+        if 'userchoices' in contract_conditions.keys():
+            return outputreturn('one-time-event-userchoice-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", f"{contract_conditions['userchoices']}", f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
+        elif 'payeeAddress' in contract_conditions.keys():
+            contract_conditions['payeeAddress'] = find_word_index_fromstring(clean_text,contract_conditions['payeeAddress'])
+            
+            # check if colon exists in the payeeAddress string
+            if ':' in contract_conditions['payeeAddress']:
+                colon_split = contract_conditions['payeeAddress'].split(':')
+                if len(colon_split)%2 != 0:
                     return outputreturn('noise')
-                try:
-                    if float(tokenamount)<=0:
-                        return outputreturn('noise')
-                except:
+                split_total = 0 
+                payeeAddress_split_dictionary = {}
+                for idx, item in enumerate(colon_split):
+                    if idx%2 == 0:
+                        # Check if floid 
+                        if not check_flo_address(item, is_testnet):
+                            return outputreturn('noise')
+                        # Add check to make sure payeeAddress is not contractAddress
+                        if contract_address == item:
+                            logger.debug('payeeAddress is same as contract address')
+                            return outputreturn('noise')
+                        
+                    if idx%2 == 1:
+                        # check if number
+                        try:
+                            item = float(item)
+                            if item <= 0:
+                                return outputreturn('noise')
+                            payeeAddress_split_dictionary[colon_split[idx-1]] = item
+                            #split_total += item
+                            split_total = perform_decimal_operation('addition', split_total, item)
+                        except:
+                            return outputreturn('noise')
+                        
+                if split_total != 100:
                     return outputreturn('noise')
-                userchoice = extract_userchoice(processed_text)
-                # todo - do we need more validations for user choice?
-                if not userchoice:
+                else:
+                    contract_conditions['payeeAddress'] = payeeAddress_split_dictionary
+                    return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
+            else:  
+                if not check_flo_address(contract_conditions['payeeAddress'], is_testnet):
                     return outputreturn('noise')
 
-                return outputreturn('one-time-event-userchoice-smartcontract-participation',f"{clean_text}", f"{tokenname}", tokenamount, f"{contract_name}", f"{contract_address}", f"{userchoice}", stateF_mapping)
-
-            elif operation == 'category2':
-                tokenamount = apply_rule1(extractAmount_rule_new1, processed_text, 'deposit-conditions:', 'pre')
-                if not tokenamount:
+                # Add check to make sure payeeAddress is not contractAddress
+                if contract_address == contract_conditions['payeeAddress']:
+                    logger.debug('payeeAddress is same as contract address')
                     return outputreturn('noise')
-                try:
-                    if float(tokenamount)<=0:
-                        return outputreturn('noise')
-                except:
-                    return outputreturn('noise')
-                deposit_conditions = extract_deposit_conditions(processed_text, blocktime=blockinfo['time'])
-                if not deposit_conditions:
-                    return outputreturn("noise")
-                return outputreturn('continuos-event-token-swap-deposit', f"{tokenname}", tokenamount, f"{contract_name}", f"{clean_text}", f"{deposit_conditions['expiryTime']}", stateF_mapping)
+                
+                contract_conditions['payeeAddress'] = {f"{contract_conditions['payeeAddress']}":100}
+                return outputreturn('one-time-event-time-smartcontract-incorporation',f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contractAmount}", f"{minimum_subscription_amount}" , f"{maximum_subscription_amount}", contract_conditions['payeeAddress'], f"{contract_conditions['expiryTime']}", contract_conditions['unix_expiryTime'], stateF_mapping)
 
-    if first_classification['categorization'] == 'smart-contract-participation-ote-ce-C':
-        # There is no way to properly differentiate between one-time-event-time-trigger participation and token swap participation 
-        # so we merge them in output return 
+
+def process_smart_contract_participation_deposit_C(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet):
+    # either participation of one-time-event contract or 
+    operation = apply_rule1(select_category_reject, processed_text, send_category, deposit_category, create_category)
+    if not operation:
+        return outputreturn('noise')
+    else:
         tokenname = first_classification['wordlist'][0][:-1]
         if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", tokenname):
             return outputreturn('noise')
-
-        tokenamount = apply_rule1(extractAmount_rule_new1, processed_text)
-        if not tokenamount:
-            return outputreturn('noise')
-        try:
-            if float(tokenamount)<=0:
-                return outputreturn('noise')
-        except:
-            return outputreturn('noise')
-        
+    
         contract_name = extract_special_character_word(first_classification['wordlist'],'@')
         if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
             return outputreturn('noise')
-        
+
         contract_address = extract_special_character_word(first_classification['wordlist'],'$')
         if contract_address is False:
             contract_address = '' 
@@ -1264,62 +1192,149 @@ def parse_flodata(text, blockinfo, net):
             if not check_flo_address(contract_address, is_testnet):
                 return outputreturn('noise') 
 
-        return outputreturn('smart-contract-one-time-event-continuos-event-participation', f"{clean_text}", f"{tokenname}", tokenamount, f"{contract_name}", f"{contract_address}", stateF_mapping)
+        if operation == 'category1':
+            tokenamount = apply_rule1(extractAmount_rule_new1, processed_text, 'userchoice:', 'pre')
+            if not tokenamount:
+                return outputreturn('noise')
+            try:
+                if float(tokenamount)<=0:
+                    return outputreturn('noise')
+            except:
+                return outputreturn('noise')
+            userchoice = extract_userchoice(processed_text)
+            # todo - do we need more validations for user choice?
+            if not userchoice:
+                return outputreturn('noise')
 
-    if first_classification['categorization'] == 'userchoice-trigger':
-        contract_name = extract_special_character_word(first_classification['wordlist'],'@')
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
+            return outputreturn('one-time-event-userchoice-smartcontract-participation',f"{clean_text}", f"{tokenname}", tokenamount, f"{contract_name}", f"{contract_address}", f"{userchoice}", stateF_mapping)
+
+        elif operation == 'category2':
+            tokenamount = apply_rule1(extractAmount_rule_new1, processed_text, 'deposit-conditions:', 'pre')
+            if not tokenamount:
+                return outputreturn('noise')
+            try:
+                if float(tokenamount)<=0:
+                    return outputreturn('noise')
+            except:
+                return outputreturn('noise')
+            deposit_conditions = extract_deposit_conditions(processed_text, blocktime=blockinfo['time'])
+            if not deposit_conditions:
+                return outputreturn("noise")
+            return outputreturn('continuos-event-token-swap-deposit', f"{tokenname}", tokenamount, f"{contract_name}", f"{clean_text}", f"{deposit_conditions['expiryTime']}", stateF_mapping)
+
+
+
+def process_smart_contract_participation_ote_ce_C(first_classification, processed_text, clean_text, stateF_mapping, is_testnet):
+    # There is no way to properly differentiate between one-time-event-time-trigger participation and token swap participation 
+    # so we merge them in output return 
+    tokenname = first_classification['wordlist'][0][:-1]
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", tokenname):
+        return outputreturn('noise')
+
+    tokenamount = apply_rule1(extractAmount_rule_new1, processed_text)
+    if not tokenamount:
+        return outputreturn('noise')
+    try:
+        if float(tokenamount)<=0:
             return outputreturn('noise')
-
-        trigger_condition = extract_trigger_condition(processed_text)
-        if not trigger_condition:
-            return outputreturn('noise')
-        return outputreturn('one-time-event-userchoice-smartcontract-trigger', f"{contract_name}", f"{trigger_condition}", stateF_mapping)
-
-    if first_classification['categorization'] == 'smart-contract-creation-ce-tokenswap':
-        operation = apply_rule1(selectCategory, processed_text, create_category, send_category+deposit_category)
-        if operation != 'category1':
-            return outputreturn('noise') 
-
-        contract_type = extract_special_character_word(first_classification['wordlist'],'*')
-        if not check_existence_of_keyword(['continuous-event'],[contract_type]):
-            return outputreturn('noise') 
-
-        contract_name = extract_special_character_word(first_classification['wordlist'],'@')
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
-            return outputreturn('noise') 
-
-        contract_token = extract_special_character_word(first_classification['wordlist'],'#')
-        if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_token):
-            return outputreturn('noise') 
-
-        contract_address = extract_special_character_word(first_classification['wordlist'],'$')
+    except:
+        return outputreturn('noise')
+    
+    contract_name = extract_special_character_word(first_classification['wordlist'],'@')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
+        return outputreturn('noise')
+    
+    contract_address = extract_special_character_word(first_classification['wordlist'],'$')
+    if contract_address is False:
+        contract_address = '' 
+    else:
         contract_address = find_original_case(contract_address, clean_text)
         if not check_flo_address(contract_address, is_testnet):
             return outputreturn('noise') 
 
-        contract_conditions = extract_contract_conditions(processed_text, contract_type, contract_token, blocktime=blockinfo['time'])
-        if contract_conditions == False:
-            return outputreturn('noise')
-        # todo - Add checks for token swap extract contract conditions 
-        try:
-            assert contract_conditions['subtype'] == 'tokenswap'
-            assert check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_conditions['accepting_token'])
-            assert check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_conditions['selling_token'])
-            if contract_conditions['priceType']=="'determined'" or contract_conditions['priceType']=='"determined"' or contract_conditions['priceType']=="determined" or contract_conditions['priceType']=="'predetermined'" or contract_conditions['priceType']=='"predetermined"' or contract_conditions['priceType']=="predetermined":
-                assert float(contract_conditions['price'])>0
-                contract_conditions['oracle_address'] = False
-            elif contract_conditions['priceType']=="dynamic" or contract_conditions['priceType']=="'dynamic'" or contract_conditions['priceType']=='"dynamic"':
-                assert float(contract_conditions['price'])>0
-                contract_conditions['oracle_address'] = find_original_case_regex(contract_conditions['oracle_address'], clean_text) # making sure the Flo Address is in its original case
-                assert check_flo_address(contract_conditions['oracle_address'], is_testnet)
-                assert contract_conditions['oracle_address'] != contract_address
-            else:
-                assert contract_conditions['priceType'] == 'statef'
-                contract_conditions['oracle_address'] = False
-        except AssertionError: 
-            return outputreturn('noise')
+    return outputreturn('smart-contract-one-time-event-continuos-event-participation', f"{clean_text}", f"{tokenname}", tokenamount, f"{contract_name}", f"{contract_address}", stateF_mapping)
 
-        return outputreturn('continuos-event-token-swap-incorporation', f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contract_conditions['subtype']}", f"{contract_conditions['accepting_token']}", f"{contract_conditions['selling_token']}", f"{contract_conditions['priceType']}", f"{contract_conditions['price']}", stateF_mapping, f"{contract_conditions['oracle_address']}")
-    
-    return outputreturn('noise')
+
+def process_userchoice_trigger(first_classification, processed_text, stateF_mapping):
+    contract_name = extract_special_character_word(first_classification['wordlist'],'@')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
+        return outputreturn('noise')
+
+    trigger_condition = extract_trigger_condition(processed_text)
+    if not trigger_condition:
+        return outputreturn('noise')
+    return outputreturn('one-time-event-userchoice-smartcontract-trigger', f"{contract_name}", f"{trigger_condition}", stateF_mapping)
+
+
+def process_smart_contract_creation_ce_tokenswap(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet):
+    operation = apply_rule1(selectCategory, processed_text, create_category, send_category+deposit_category)
+    if operation != 'category1':
+        return outputreturn('noise') 
+
+    contract_type = extract_special_character_word(first_classification['wordlist'],'*')
+    if not check_existence_of_keyword(['continuous-event'],[contract_type]):
+        return outputreturn('noise') 
+
+    contract_name = extract_special_character_word(first_classification['wordlist'],'@')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_name):
+        return outputreturn('noise') 
+
+    contract_token = extract_special_character_word(first_classification['wordlist'],'#')
+    if not check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_token):
+        return outputreturn('noise') 
+
+    contract_address = extract_special_character_word(first_classification['wordlist'],'$')
+    contract_address = find_original_case(contract_address, clean_text)
+    if not check_flo_address(contract_address, is_testnet):
+        return outputreturn('noise') 
+
+    contract_conditions = extract_contract_conditions(processed_text, contract_type, contract_token, blocktime=blockinfo['time'])
+    if contract_conditions == False:
+        return outputreturn('noise')
+    # todo - Add checks for token swap extract contract conditions 
+    try:
+        assert contract_conditions['subtype'] == 'tokenswap'
+        assert check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_conditions['accepting_token'])
+        assert check_regex("^[A-Za-z][A-Za-z0-9_-]*[A-Za-z0-9]$", contract_conditions['selling_token'])
+        if contract_conditions['priceType']=="'determined'" or contract_conditions['priceType']=='"determined"' or contract_conditions['priceType']=="determined" or contract_conditions['priceType']=="'predetermined'" or contract_conditions['priceType']=='"predetermined"' or contract_conditions['priceType']=="predetermined":
+            assert float(contract_conditions['price'])>0
+            contract_conditions['oracle_address'] = False
+        elif contract_conditions['priceType']=="dynamic" or contract_conditions['priceType']=="'dynamic'" or contract_conditions['priceType']=='"dynamic"':
+            assert float(contract_conditions['price'])>0
+            contract_conditions['oracle_address'] = find_original_case_regex(contract_conditions['oracle_address'], clean_text) # making sure the Flo Address is in its original case
+            assert check_flo_address(contract_conditions['oracle_address'], is_testnet)
+            assert contract_conditions['oracle_address'] != contract_address
+        else:
+            assert contract_conditions['priceType'] == 'statef'
+            contract_conditions['oracle_address'] = False
+    except AssertionError: 
+        return outputreturn('noise')
+
+    return outputreturn('continuos-event-token-swap-incorporation', f"{contract_token}", f"{contract_name}", f"{contract_address}", f"{clean_text}", f"{contract_conditions['subtype']}", f"{contract_conditions['accepting_token']}", f"{contract_conditions['selling_token']}", f"{contract_conditions['priceType']}", f"{contract_conditions['price']}", stateF_mapping, f"{contract_conditions['oracle_address']}")
+
+def parse_flodata(text, blockinfo, net):
+    is_testnet = net == 'testnet'
+
+    if text == '':
+        return outputreturn('noise')
+
+    clean_text, processed_text = text_preprocessing(text)
+    print("Processing stateF")
+    stateF_mapping = isStateF(processed_text) 
+    first_classification = firstclassification_rawstring(processed_text)
+
+    categorization = first_classification['categorization']
+    if categorization == 'tokensystem-C':
+        return process_tokensystem_C(first_classification, processed_text, clean_text, stateF_mapping, is_testnet)
+    elif categorization == 'smart-contract-creation-C':
+        return process_smart_contract_creation_C(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet)
+    elif categorization == 'smart-contract-participation-deposit-C':
+        return process_smart_contract_participation_deposit_C(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet)
+    elif categorization == 'smart-contract-participation-ote-ce-C':
+        return process_smart_contract_participation_ote_ce_C(first_classification, processed_text, clean_text, stateF_mapping, is_testnet)
+    elif categorization == 'userchoice-trigger':
+        return process_userchoice_trigger(first_classification, processed_text, stateF_mapping)
+    elif categorization == 'smart-contract-creation-ce-tokenswap':
+        return process_smart_contract_creation_ce_tokenswap(first_classification, processed_text, clean_text, blockinfo, stateF_mapping, is_testnet)
+    else:
+        return outputreturn('noise')

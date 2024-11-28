@@ -2,9 +2,9 @@
 
 ## Setup setps
 
-1. Run setup.sh to install python3.7 virtual environment, install and configure MySQL if it does not exist, install all dependencies and then start the application.
-2. Give setup.sh execute permissions first `chmod +x setup.sh`, and then `./setup.sh` 
-
+1. Just download one file from this setup.sh and run it. It will download the rest of repository
+2. Give setup.sh execute permissions first `chmod +x setup.sh`, and then `./setup.sh`
+3. Run setup.sh to install python3.7 virtual environment, install and configure MySQL if it does not exist, install all dependencies and then start the application.
 
 ## How to run
 1. python3.7 tracktokens-smartcontracts.py 

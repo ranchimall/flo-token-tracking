@@ -77,12 +77,13 @@ sudo mysql -e "FLUSH PRIVILEGES;"
 
 echo "MySQL user '${MYSQL_USER}' created and granted privileges on databases matching 'rm_%_db'."
 
-# Step 8: Clone the PyFLO Repository
-if [ ! -d "pyflo" ]; then
-    echo "Cloning the PyFLO repository..."
-    git clone https://github.com/ranchimall/pyflo
+# Step 8: Clone the FLO Token Tracking Repository Only if `setup.sh` Is Not Already Inside the Repository Directory
+if [ ! -f "tracktokens-smartcontracts.py" ]; then
+    echo "Cloning the FLO Token Tracking repository (mysql-migration branch)..."
+    git clone --branch mysql-migration https://github.com/ranchimall/flo-token-tracking
+    cd flo-token-tracking
 else
-    echo "PyFLO repository already exists. Skipping clone."
+    echo "Setup is already in the directory containing the repository. Skipping clone."
 fi
 
 # Step 9: Install Python Dependencies
@@ -105,26 +106,7 @@ pip install --upgrade pip
 # Install Python packages
 pip install --use-pep517 -r requirements.txt
 
-# Step 10: Install PyFLO
-echo "Installing PyFLO..."
-sudo python3 pyflo/setup.py install
-
-# Inform the user
-echo "Python dependencies and PyFLO installed successfully."
-
-# Step 11: Clone the FLO Token Tracking Repository
-if [ ! -d "flo-token-tracking" ]; then
-    echo "Cloning the FLO Token Tracking repository (mysql-migration branch)..."
-    git clone --branch mysql-migration https://github.com/ranchimall/flo-token-tracking
-else
-    echo "FLO Token Tracking repository already exists. Skipping clone."
-fi
-
-# Step 12: Navigate into the FLO Token Tracking Directory
-echo "Navigating into the FLO Token Tracking directory..."
-cd flo-token-tracking
-
-# Step 13: Start the Python Application
+# Step 10: Start the Python Application
 echo "Starting the Python application 'tracktokens-smartcontracts.py'..."
 python3.7 tracktokens-smartcontracts.py
 

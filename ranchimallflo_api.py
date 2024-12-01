@@ -1330,7 +1330,7 @@ async def getTokenList():
                     parts = stripped_name.split('_')
                     if len(parts) == 1:  # Token databases have a single part (e.g., usd, inr)
                         token_list.append(stripped_name)
-                    elif len(parts) == 2 and len(parts[1]) == 34 and parts[1].startswith('F'):
+                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):
                         # Smart contracts are excluded
                         continue
 
@@ -2515,7 +2515,7 @@ async def categoriseString(urlstring):
                     parts = stripped_name.split('_')
                     if len(parts) == 1:  # Token database
                         token_names.add(stripped_name.lower())
-                    elif len(parts) == 2 and len(parts[1]) == 34 and parts[1].startswith('F'):  # Smart contract database
+                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):  # Smart contract database
                         contract_list.append({
                             "contractName": parts[0],
                             "contractAddress": parts[1]
@@ -2575,7 +2575,7 @@ async def getTokenSmartContractList():
 
                     if len(parts) == 1:  # Token database
                         token_list.append(stripped_name)
-                    elif len(parts) == 2 and len(parts[1]) == 34 and parts[1].startswith('F'):  # Smart contract database
+                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):  # Smart contract database
                         contract_list.append({
                             "contractName": parts[0],
                             "contractAddress": parts[1]
@@ -2735,7 +2735,7 @@ async def tokenList():
                         # Include token databases and exclude smart contract databases
                         if len(parts) == 1:  # Token databases have a single part (e.g., usd, inr)
                             token_list.append(stripped_name)
-                        elif len(parts) == 2 and len(parts[1]) == 34 and parts[1].startswith('F'):
+                        elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):
                             # Smart contract databases are excluded
                             continue
 

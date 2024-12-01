@@ -22,7 +22,7 @@ This contains both RanchiMall Token SmartContract Scanner, as well as API on MYS
 4. python3 tracktokens-smartcontracts.py --rebuild usd# tokenroom# => To reprocess existing blockchain data for USD# TOKENROOM# as stored in latestBlocks table of rm_latestCache_db database
 
 ### API
-1.python3 ranchimallflo_api.py
+1. python3 ranchimallflo_api.py
 
 # FLO Token & Smart Contract System 
 [![Test flodata parsing](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml/badge.svg?branch=swap-statef-testing)](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml)

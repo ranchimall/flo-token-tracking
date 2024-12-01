@@ -261,7 +261,7 @@ def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
     if response.status_code == 200:
         response = response.json()
     else:
-        logger.info('Response from the Flosight API failed')
+        logger.info('Response from the Blockbook API failed')
         sys.exit(0)
 
     committee_list = []
@@ -302,11 +302,11 @@ def refresh_committee_list(admin_flo_id, api_url, blocktime):
                 if response.status_code == 200:
                     return response.json()
                 else:
-                    logger.info(f'Response from the Flosight API failed. Retry in {RETRY_TIMEOUT_SHORT}s')
+                    logger.info(f'Response from the Blockbook API failed. Retry in {RETRY_TIMEOUT_SHORT}s')
                     #sys.exit(0)
                     time.sleep(RETRY_TIMEOUT_SHORT)
             except:
-                logger.info(f'Fetch from the Flosight API failed. Retry in {RETRY_TIMEOUT_LONG}s...')
+                logger.info(f'Fetch from the Blockbook API failed. Retry in {RETRY_TIMEOUT_LONG}s...')
                 time.sleep(RETRY_TIMEOUT_LONG)
 
     url = f'{api_url}api/v1/address/{admin_flo_id}?details=txs'
@@ -2983,7 +2983,7 @@ def scanBlockchain():
         processBlock(blockindex=blockindex) 
 
     # At this point the script has updated to the latest block
-    # Now we connect to flosight's websocket API to get information about the latest blocks
+    # Now we connect to Blockbook's websocket API to get information about the latest blocks
 
 def switchNeturl(currentneturl):
     # Use modulo operation to simplify the logic
@@ -2992,9 +2992,9 @@ def switchNeturl(currentneturl):
 
 
 def reconnectWebsocket(socket_variable):
-    # Switch a to different flosight
+    # Switch a to different Blockbook
     # neturl = switchNeturl(neturl)
-    # Connect to Flosight websocket to get data on new incoming blocks
+    # Connect to Blockbook websocket to get data on new incoming blocks
     i=0
     newurl = serverlist[0]
     while(not socket_variable.connected):
@@ -3073,7 +3073,8 @@ logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
 logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
 
 formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
-file_handler = logging.FileHandler(os.path.join(config['DEFAULT']['DATA_PATH'],'tracking.log'))
+DATA_PATH = os.path.dirname(os.path.abspath(__file__))
+file_handler = logging.FileHandler(os.path.join(DATA_PATH, 'tracking.log'))
 file_handler.setLevel(logging.INFO)
 file_handler.setFormatter(formatter)
 
@@ -3087,7 +3088,7 @@ logger.addHandler(stream_handler)
 #  Rule 1     - Read command line arguments to reset the databases as blank
 #  Rule 2     - Read config to set testnet/mainnet
 #  Rule 3     - Set flo blockexplorer location depending on testnet or mainnet
-#  Rule 4     - Set the local flo-cli path depending on testnet or mainnet ( removed this feature | Flosights are the only source )
+#  Rule 4     - Set the local flo-cli path depending on testnet or mainnet ( removed this feature | Blockbooks are the only source )
 #  Rule 5     - Set the block number to scan from
 
 
@@ -3111,15 +3112,15 @@ if (config['DEFAULT']['NET'] != 'mainnet') and (config['DEFAULT']['NET'] != 'tes
 # Specify ADMIN ID
 serverlist = None
 if config['DEFAULT']['NET'] == 'mainnet':
-    serverlist = config['DEFAULT']['MAINNET_FLOSIGHT_SERVER_LIST']
+    serverlist = config['DEFAULT']['MAINNET_BLOCKBOOK_SERVER_LIST']
     APP_ADMIN = 'FNcvkz9PZNZM3HcxM1XTrVL4tgivmCkHp9'
     websocket_uri = get_websocket_uri(testnet=False)
 elif config['DEFAULT']['NET'] == 'testnet':
-    serverlist = config['DEFAULT']['TESTNET_FLOSIGHT_SERVER_LIST']
+    serverlist = config['DEFAULT']['TESTNET_BLOCKBOOK_SERVER_LIST']
     APP_ADMIN = 'oWooGLbBELNnwq8Z5YmjoVjw8GhBGH3qSP'
     websocket_uri = get_websocket_uri(testnet=True)
 serverlist = serverlist.split(',')
-neturl = config['DEFAULT']['FLOSIGHT_NETURL']
+neturl = config['DEFAULT']['BLOCKBOOK_NETURL']
 api_url = neturl
 tokenapi_sse_url = config['DEFAULT']['TOKENAPI_SSE_URL']
 API_VERIFY = config['DEFAULT']['API_VERIFY']

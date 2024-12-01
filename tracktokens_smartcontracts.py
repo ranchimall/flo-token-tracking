@@ -1,1160 +1,246 @@
-from collections import defaultdict
+import argparse 
+import configparser 
 import json
-import os
-import requests
-import sys
-import time
-from datetime import datetime
-from quart import jsonify, make_response, Quart, render_template, request, flash, redirect, url_for, send_file
-from quart_cors import cors
-import asyncio
-from typing import Optional
-from config import *
-import parsing
-import subprocess
-import pyflo
-from operator import itemgetter
-import pdb
-import ast
-import time
-
-
-
-#MYSQL ENHANCEMENTS START
-import configparser
-import aiohttp
-import aiomysql
-import asyncio
-import atexit
+import logging 
+import os 
+import shutil 
+import sys 
+import pyflo 
+import requests 
+from sqlalchemy import create_engine, func, and_  
+from sqlalchemy.orm import sessionmaker 
+from sqlalchemy.sql import text
+from sqlalchemy.exc import OperationalError, IntegrityError, ProgrammingError, SQLAlchemyError
+from sqlalchemy import MetaData
+from sqlalchemy import BigInteger, Column
 import pymysql
-from dbutils.pooled_db import PooledDB
-from apscheduler.schedulers.background import BackgroundScheduler
-import logging
+import time 
+import arrow 
+import parsing 
+from parsing import perform_decimal_operation
+import re 
+from datetime import datetime 
+from ast import literal_eval 
+from models import SystemData, TokenBase, ActiveTable, ConsumedTable, TransferLogs, TransactionHistory, TokenContractAssociation, ContractBase, ContractStructure, ContractParticipants, ContractTransactionHistory, ContractDeposits, ConsumedInfo, ContractWinners, ContinuosContractBase, ContractStructure2, ContractParticipants2, ContractDeposits2, ContractTransactionHistory2, SystemBase, ActiveContracts, SystemData, ContractAddressMapping, TokenAddressMapping, DatabaseTypeMapping, TimeActions, RejectedContractTransactionHistory, RejectedTransactionHistory, LatestCacheBase, LatestTransactions, LatestBlocks 
+from statef_processing import process_stateF 
+import asyncio
+import websockets
+import hashlib
+from decimal import Decimal
+import pdb
+from util_rollback import rollback_to_block
 
 
-# Configuration Setup
-config = configparser.ConfigParser()
-config.read('config.ini')
+import requests
+from requests.packages.urllib3.exceptions import InsecureRequestWarning
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# Disable the InsecureRequestWarning
+requests.packages.urllib3.disable_warnings(InsecureRequestWarning)
 
-app = Quart(__name__)
-app.clients = set()
-app = cors(app, allow_origin="*")
+#ENHANCEMENTS START
+import glob
 
-API_TIMEOUT = int(config['API']['API_TIMEOUT'])  # 1 second
-RETRY_TIMEOUT_LONG = int(config['API']['RETRY_TIMEOUT_LONG'])  # 30 minutes
-RETRY_TIMEOUT_SHORT = int(config['API']['RETRY_TIMEOUT_SHORT'])  # 1 minute
-DB_RETRY_TIMEOUT = int(config['API']['DB_RETRY_TIMEOUT'])  # 1 minute
-
-
-
-
-# Global connection pools
-sync_connection_pool = None
-async_connection_pool = None
-
-class MySQLConfig:
-    def __init__(self):
-        self.username = config['MYSQL'].get('USERNAME', 'default_user')
-        self.password = config['MYSQL'].get('PASSWORD', 'default_password')
-        self.host = config['MYSQL'].get('HOST', 'localhost')
-        self.database_prefix = config['MYSQL'].get('DATABASE_PREFIX', 'rm')
-
-mysql_config = MySQLConfig()
-net = config['DEFAULT'].get('NET', 'mainnet')  # Default to 'mainnet' if not set
-
-# Initialize connection pools
-async def initialize_connection_pools():
-    global sync_connection_pool, async_connection_pool
-
-    try:
-        # Sync connection pool
-        sync_connection_pool = PooledDB(
-            creator=pymysql,
-            maxconnections=10,
-            mincached=2,
-            maxcached=5,
-            blocking=True,
-            host=mysql_config.host,
-            user=mysql_config.username,
-            password=mysql_config.password,
-            charset="utf8mb4",
-        )
-
-        # Async connection pool
-        async_connection_pool = await aiomysql.create_pool(
-            host=mysql_config.host,
-            user=mysql_config.username,
-            password=mysql_config.password,
-            db=None,
-            charset="utf8mb4",
-            maxsize=10,
-            minsize=2,
-            loop=asyncio.get_event_loop(),
-        )
-        print("Connection pools initialized successfully.")
-
-    except Exception as e:
-        print(f"Error initializing connection pools: {e}")
-        raise RuntimeError("Failed to initialize database connection pools")
-
-@app.before_serving
-async def before_serving():
-    await initialize_connection_pools()
-    print("Connection pools initialized before serving requests.")
-
-@app.after_serving
-async def after_serving():
-    if async_connection_pool:
-        async_connection_pool.close()
-        await async_connection_pool.wait_closed()
-        print("Async connection pool closed.")
-
-
-async def get_mysql_connection(db_name, no_standardize=False, USE_ASYNC=False):
-    logger.info("ABC: Entering get_mysql_connection function")
-    conn = None  # Initialize conn to None to avoid "referenced before assignment"
-    logger.info("ABC: Initialized conn to None")
-
-    db_name = standardize_db_name(db_name) if not no_standardize else db_name
-    logger.info(f"ABC: Database name standardized to: {db_name}")
-
-    try:
-        logger.info("ABC: Checking USE_ASYNC flag")
-        if USE_ASYNC:
-            logger.info("ABC: Async mode enabled")
-            if not async_connection_pool:
-                logger.error("ABC: Async connection pool not initialized")
-                raise RuntimeError("Async connection pool not initialized")
-
-            logger.info("ABC: Acquiring async connection")
-            conn = await async_connection_pool.acquire()  # Acquire connection
-            if conn is None:
-                logger.error("ABC: Failed to acquire a valid connection")
-                raise RuntimeError("Failed to acquire a valid async connection")
-            logger.info("ABC: Async connection acquired successfully")
-
-            async with conn.cursor() as cursor:
-                logger.info("ABC: Creating async cursor and selecting database")
-                await cursor.execute(f"USE `{db_name}`")  # Use escaped database name
-                logger.info(f"ABC: Database `{db_name}` selected successfully in async mode")
-            return conn  # Return connection for further use
-        else:
-            logger.info("ABC: Sync mode enabled")
-            if not sync_connection_pool:
-                logger.error("ABC: Sync connection pool not initialized")
-                raise RuntimeError("Sync connection pool not initialized")
-
-            logger.info("ABC: Acquiring sync connection")
-            conn = sync_connection_pool.connection()  # Acquire sync connection
-            if conn is None:
-                logger.error("ABC: Failed to acquire a valid connection")
-                raise RuntimeError("Failed to acquire a valid sync connection")
-            logger.info("ABC: Sync connection acquired successfully")
-
-            conn.select_db(db_name)  # Select database
-            logger.info(f"ABC: Database `{db_name}` selected successfully in sync mode")
-            return conn  # Return connection for further use
-    except Exception as e:
-        logger.error(f"ABC: Error in database connection: {e}")
-        raise
-
-
-
-
-
-
-
-
-
-
-
-
-def is_backend_ready():
+def add_block_hashrecord(block_number, block_hash):
     """
-    Dummy function that always indicates the backend is ready.
+    Adds a new block entry to the RecentBlocks table if it does not already exist.
+    Maintains only the latest 1000 blocks by removing the oldest entry if necessary.
+
+    :param block_number: The block number of the new block.
+    :param block_hash: The hash of the new block.
     """
-    return True
-
-
-#MYSQL ENHANCEMENTS END
-
-
-
-
-INTERNAL_ERROR = "Unable to process request, try again later"
-BACKEND_NOT_READY_ERROR = "Server is still syncing, try again later!"
-BACKEND_NOT_READY_WARNING = "Server is still syncing, data may not be final"
-
-# Global values and configg
-internalTransactionTypes = [ 'tokenswapDepositSettlement', 'tokenswapParticipationSettlement', 'smartContractDepositReturn']
-
-if net == 'mainnet':
-    is_testnet = False
-elif net == 'testnet':
-    is_testnet = True
-
-# Validation functionss
-def check_flo_address(floaddress, is_testnet=False):
-    return pyflo.is_address_valid(floaddress, testnet=is_testnet)
-
-def check_integer(value):
-    return str.isdigit(value)
-
-""" ??? NOT USED???
-# Helper functions
-def retryRequest(tempserverlist, apicall):
-    if len(tempserverlist) != 0:
+    while True:
         try:
-            response = requests.get('{}api/{}'.format(tempserverlist[0], apicall))
-        except:
-            tempserverlist.pop(0)
-            return retryRequest(tempserverlist, apicall)
-        else:
-            if response.status_code == 200:
-                return json.loads(response.content)
-            else:
-                tempserverlist.pop(0)
-                return retryRequest(tempserverlist, apicall)
-    else:
-        print("None of the APIs are responding for the call {}".format(apicall))
-        sys.exit(0)
-
-
-def multiRequest(apicall, net):
-    testserverlist = ['http://0.0.0.0:9000/', 'https://testnet.flocha.in/', 'https://testnet-flosight.duckdns.org/']
-    mainserverlist = ['http://0.0.0.0:9001/', 'https://livenet.flocha.in/', 'https://testnet-flosight.duckdns.org/']
-    if net == 'mainnet':
-        return retryRequest(mainserverlist, apicall)
-    elif net == 'testnet':
-        return retryRequest(testserverlist, apicall)
-"""
-
-
-async def blockdetailhelper(blockdetail):
-    # Determine whether the input is blockHash or blockHeight
-    if blockdetail.isdigit():
-        blockHash = None
-        blockHeight = int(blockdetail)
-    else:
-        blockHash = str(blockdetail)
-        blockHeight = None
-
-    # Get the database connection for the "latestCache" DB asynchronously
-    conn = await get_mysql_connection("latestCache", USE_ASYNC=True)  # Use the async connection pool
-
-    try:
-        async with conn.cursor() as cursor:
-            # Query the database based on blockHash or blockHeight
-            if blockHash:
-                query = "SELECT jsonData FROM latestBlocks WHERE blockHash = %s"
-                await cursor.execute(query, (blockHash,))
-            elif blockHeight:
-                query = "SELECT jsonData FROM latestBlocks WHERE blockNumber = %s"
-                await cursor.execute(query, (blockHeight,))
-            else:
-                raise ValueError("Invalid blockdetail input. Must be blockHash or blockHeight.")
-
-            # Fetch the result asynchronously
-            result = await cursor.fetchall()
-
-    except aiomysql.MySQLError as e:
-        print(f"Error querying database: {e}")
-        result = []
-
-    finally:
-        # Release the connection back to the pool
-        await conn.commit()
-
-    return result
-
-
-async def transactiondetailhelper(transactionHash):
-    # Get the database connection for the "latestCache" DB asynchronously
-    conn = await get_mysql_connection("latestCache", USE_ASYNC=True)  # Use the async connection pool
-
-    try:
-        async with conn.cursor() as cursor:
-            # Query the database for the transaction hash
-            query = """
-                SELECT jsonData, parsedFloData, transactionType, db_reference 
-                FROM latestTransactions 
-                WHERE transactionHash = %s
-            """
-            await cursor.execute(query, (transactionHash,))
-
-            # Fetch the result asynchronously
-            transactionJsonData = await cursor.fetchall()
-
-    except aiomysql.MySQLError as e:
-        print(f"Error querying database: {e}")
-        transactionJsonData = []
-
-    finally:
-        # Release the connection back to the pool
-        await conn.commit()
-
-    return transactionJsonData
-
-#ATTEMPT 1
-# async def update_transaction_confirmations(transactionJson):
-#     url = f"{apiUrl}api/v1/tx/{transactionJson['txid']}"
-#     try:
-#         async with aiohttp.ClientSession() as session:
-#             async with session.get(url) as response:
-#                 if response.status == 200:
-#                     response_data = await response.json()
-#                     transactionJson['confirmations'] = response_data['confirmations']
-#     except Exception as e:
-#         print(f"Error fetching transaction confirmation: {e}")
-#     return transactionJson
-
-# ATTEMPT 2
-# async def update_transaction_confirmations(transactionJson):
-#     try:
-#         # Simulate the response without making an actual API call as it is slowing down
-#         transactionJson['confirmations'] = transactionJson['confirmations']
-#         logger.info(f"Mock confirmation set for transaction {transactionJson['txid']}: {transactionJson['confirmations']} confirmations")
-#     except Exception as e:
-#         print(f"Error updating transaction confirmation: {e}")
-#     return transactionJson
-
-#ATTEMPT 3
-# async def update_transaction_confirmations(transactionJson):
-#     url = f"{apiUrl}api/v1/tx/{transactionJson['txid']}"
-#     try:
-#         timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-#         async with aiohttp.ClientSession(timeout=timeout) as session:
-#             async with session.get(url) as response:
-#                 if response.status == 200:
-#                     response_data = await response.json()
-#                     transactionJson['confirmations'] = response_data['confirmations']
-#                 else:
-#                     print(f"API error: {response.status}")
-#     except asyncio.TimeoutError:
-#         print(f"Request timed out after {API_TIMEOUT} seconds")
-#     except Exception as e:
-#         print(f"Error fetching transaction confirmation: {e}")
-#     return transactionJson
-
-
-async def update_transaction_confirmations(transactionJson):
-    if transactionJson.get('confirmations', 0) >= 100:
-        return transactionJson
-    
-    url = f"{apiUrl}api/v1/tx/{transactionJson['txid']}"
-    try:
-        timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.get(url) as response:
-                if response.status == 200:
-                    response_data = await response.json()
-                    transactionJson['confirmations'] = response_data['confirmations']
-                else:
-                    print(f"API error: {response.status}")
-    except asyncio.TimeoutError:
-        print(f"Request timed out after {API_TIMEOUT} seconds")
-    except Exception as e:
-        print(f"Error fetching transaction confirmation: {e}")
-    return transactionJson
-
-
-
-async def smartcontract_morph_helper(smart_contracts):
-    contractList = []
-    for idx, contract in enumerate(smart_contracts):
-        contractDict = {}
-        contractDict['contractName'] = contract[1]
-        contractDict['contractAddress'] = contract[2]
-        contractDict['status'] = contract[3]
-        contractDict['contractType'] = contract[5]
-
-        if contractDict['contractType'] in ['continuous-event', 'continuos-event']:
-            contractDict['contractSubType'] = 'tokenswap'
-            accepting_selling_tokens = ast.literal_eval(contract[4])
-            contractDict['acceptingToken'] = accepting_selling_tokens[0]
-            contractDict['sellingToken'] = accepting_selling_tokens[1]
-            
-            # Awaiting async calls
-            contractStructure = await fetchContractStructure(contractDict['contractName'], contractDict['contractAddress'])
-            if contractStructure['pricetype'] == 'dynamic':
-                # temp fix
-                if 'oracle_address' in contractStructure.keys():
-                    contractDict['oracle_address'] = contractStructure['oracle_address']
-                    contractDict['price'] = await fetch_dynamic_swap_price(contractStructure, {'time': datetime.now().timestamp()})
-            else:
-                contractDict['price'] = contractStructure['price']
-        
-        elif contractDict['contractType'] == 'one-time-event':
-            contractDict['tokenIdentification'] = contract[4]
-            # Awaiting async call
-            contractStructure = await fetchContractStructure(contractDict['contractName'], contractDict['contractAddress'])
-            
-            if 'payeeAddress' in contractStructure.keys():
-                contractDict['contractSubType'] = 'time-trigger'
-            else:
-                choice_list = []
-                for obj_key in contractStructure['exitconditions'].keys():
-                    choice_list.append(contractStructure['exitconditions'][obj_key])
-                contractDict['userChoices'] = choice_list
-                contractDict['contractSubType'] = 'external-trigger'
-                contractDict['expiryDate'] = contract[9]
-            
-            contractDict['closeDate'] = contract[10]
-
-        contractDict['transactionHash'] = contract[6]
-        contractDict['blockNumber'] = contract[7]
-        contractDict['incorporationDate'] = contract[8]
-        contractList.append(contractDict)
-
-    return contractList
-
-
-def return_smart_contracts(connection, contractName=None, contractAddress=None):
-
-    cursor = connection.cursor()
-    query = """
-        SELECT * FROM activecontracts 
-        WHERE id IN (
-            SELECT MAX(id) FROM activecontracts GROUP BY contractName, contractAddress
-        )
-    """
-    conditions = []
-    params = []
-
-    if contractName:
-        conditions.append("contractName = %s")
-        params.append(contractName)
-    if contractAddress:
-        conditions.append("contractAddress = %s")
-        params.append(contractAddress)
-
-    if conditions:
-        query += " AND " + " AND ".join(conditions)
-
-    try:
-        cursor.execute(query, params)
-        smart_contracts = cursor.fetchall()
-    except Exception as e:
-        print(f"Error fetching smart contracts: {e}")
-        smart_contracts = []
-    finally:
-        cursor.close()
-
-    return smart_contracts
-
-
-async def fetchContractStructure(contractName, contractAddress):
-    """
-    Fetches the structure of a smart contract from the MySQL database.
-
-    Args:
-        contractName (str): The name of the contract.
-        contractAddress (str): The address of the contract.
-
-    Returns:
-        dict: The contract structure if found, or 0 if the database does not exist.
-    """
-    # Construct the database name dynamically
-    db_name = f"{contractName.strip()}_{contractAddress.strip()}"
-
-    # Get the database connection asynchronously
-    conn = await get_mysql_connection(db_name, USE_ASYNC=True)  # Use async connection pool
-
-    try:
-        # Use async cursor
-        async with conn.cursor() as cursor:
-            # Fetch contract structure from the database asynchronously
-            await cursor.execute('SELECT attribute, value FROM contractstructure')
-            result = await cursor.fetchall()
-
-            contractStructure = {}
-            conditionDict = {}
-            counter = 0
-
-            for item in result:
-                attribute, value = item
-                if attribute == 'exitconditions':
-                    conditionDict[counter] = value
-                    counter += 1
-                else:
-                    contractStructure[attribute] = value
-
-            if conditionDict:
-                contractStructure['exitconditions'] = conditionDict
-
-        # Convert specific fields to appropriate data types
-        if 'contractAmount' in contractStructure:
-            contractStructure['contractAmount'] = float(contractStructure['contractAmount'])
-        if 'payeeAddress' in contractStructure:
-            contractStructure['payeeAddress'] = json.loads(contractStructure['payeeAddress'])
-        if 'maximumsubscriptionamount' in contractStructure:
-            contractStructure['maximumsubscriptionamount'] = float(contractStructure['maximumsubscriptionamount'])
-        if 'minimumsubscriptionamount' in contractStructure:
-            contractStructure['minimumsubscriptionamount'] = float(contractStructure['minimumsubscriptionamount'])
-        if 'price' in contractStructure:
-            contractStructure['price'] = float(contractStructure['price'])
-
-        return contractStructure
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error while fetching contract structure: {e}")
-        return 0
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return 0
-    finally:
-        # Release the connection back to the pool (commit if necessary)
-        await conn.commit()
-
-async def fetchContractStatus(contractName, contractAddress):
-    try:
-        # Get the system database connection asynchronously
-        conn = await get_mysql_connection('system', USE_ASYNC=True)  # Using async connection pool
-
-        async with conn.cursor() as cursor:
-            # Query to fetch the contract status
-            query = """
-                SELECT status 
-                FROM activecontracts 
-                WHERE contractName = %s AND contractAddress = %s 
-                ORDER BY id DESC 
-                LIMIT 1
-            """
-            await cursor.execute(query, (contractName, contractAddress))
-            status = await cursor.fetchone()
-
-        # Return the status if found, otherwise None
-        if status:
-            return status[0]
-        else:
-            return None
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error while fetching contract status: {e}")
-        return None
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return None
-    finally:
-        # Ensure the connection is released back to the pool
-        await conn.commit()  # Commit if needed (to handle connection lifecycle)
-
-
-
-def extract_ip_op_addresses(transactionJson):
-    sender_address = transactionJson['vin'][0]['addresses'][0]
-    receiver_address = None
-    for utxo in transactionJson['vout']:
-        if utxo['scriptPubKey']['addresses'][0] == sender_address:
-            continue
-        receiver_address = utxo['scriptPubKey']['addresses'][0]
-    return sender_address, receiver_address
-
-
-async def updatePrices():
-    """
-    Updates the latest price data for various currency pairs in the MySQL database asynchronously.
-    """
-    prices = {}
-
-    # USD -> INR
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.exchangerate-api.com/v4/latest/usd", timeout=10) as response:
-                if response.status == 200:
-                    price = await response.json()
-                    prices['USDINR'] = price['rates']['INR']
-    except Exception as e:
-        print(f"Error fetching USD to INR exchange rate: {e}")
-
-    # Blockchain stuff: BTC, FLO -> USD, INR
-    # BTC -> USD | BTC -> INR
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.coingecko.com/api/v3/simple/price?ids=bitcoin,flo&vs_currencies=usd,inr", timeout=10) as response:
-                if response.status == 200:
-                    price = await response.json()
-                    prices['BTCUSD'] = price['bitcoin']['usd']
-                    prices['BTCINR'] = price['bitcoin']['inr']
-    except Exception as e:
-        print(f"Error fetching BTC prices: {e}")
-
-    # FLO -> USD | FLO -> INR
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.get("https://api.coinlore.net/api/ticker/?id=67", timeout=10) as response:
-                if response.status == 200:
-                    price = await response.json()
-                    prices["FLOUSD"] = float(price[0]['price_usd'])
-                    if 'USDINR' in prices:
-                        prices["FLOINR"] = float(prices["FLOUSD"]) * float(prices['USDINR'])
-    except Exception as e:
-        print(f"Error fetching FLO prices: {e}")
-
-    # Log the updated prices
-    print('Prices updated at time: %s' % datetime.now())
-    print(prices)
-
-    # Update prices in the database asynchronously
-    try:
-        # Use async MySQL connection
-        conn = await get_mysql_connection('system', USE_ASYNC=True)
-        
-        async with conn.cursor() as cursor:
-            # Update each rate pair in the database asynchronously
-            for pair, price in prices.items():
-                await cursor.execute(
-                    "UPDATE ratepairs SET price = %s WHERE ratepair = %s",
-                    (price, pair)
-                )
-
-            await conn.commit()
-            print("Prices successfully updated in the database.")
-    
-    except aiomysql.MySQLError as e:
-        print(f"Database error while updating prices: {e}")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-
-
-async def fetch_dynamic_swap_price(contractStructure, blockinfo):
-    oracle_address = contractStructure['oracle_address']
-    print(f'Oracle address is: {oracle_address}')
-
-    async def send_api_request(url):
-        timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        print(f'API error: {response.status}')
-                        return None
-        except asyncio.TimeoutError:
-            print(f"Request timed out after {API_TIMEOUT} seconds")
-            return None
+            conn = create_database_connection('latest_cache', {'db_name': "latestCache"})
+            break
         except Exception as e:
-            print(f"Error during API request: {e}")
-            return None
+            logger.error(f"Error connecting to database: {e}")
+            time.sleep(DB_RETRY_TIMEOUT)
 
     try:
-        # Fetch transactions associated with the oracle address
-        url = f'{apiUrl}api/v1/addr/{oracle_address}'
-        response_data = await send_api_request(url)
-        if response_data is None:
+        # Check if the block already exists
+        existing_block = conn.execute(
+            'SELECT * FROM RecentBlocks WHERE blockNumber = %s', (block_number,)
+        ).fetchone()
+        if existing_block:
+            logger.info(f"Block {block_number} already exists. No action taken.")
+            return
+
+        # Add the new block entry
+        conn.execute(
+            'INSERT INTO RecentBlocks (blockNumber, blockHash) VALUES (%s, %s)',
+            (block_number, block_hash)
+        )
+        logger.info(f"Added hash of block {block_number} with hash {block_hash} to detect reorganization of chain.")
+
+        # Check the count of blocks
+        block_count = conn.execute('SELECT COUNT(*) FROM RecentBlocks').fetchone()[0]
+
+        # If more than 1000 blocks, delete the oldest entries
+        if block_count > 1000:
+            # Determine how many blocks to remove
+            excess_count = block_count - 1000
+            oldest_blocks = conn.execute(
+                'SELECT id FROM RecentBlocks ORDER BY id ASC LIMIT %s',
+                (excess_count,)
+            ).fetchall()
+            for block in oldest_blocks:
+                conn.execute('DELETE FROM RecentBlocks WHERE id = %s', (block[0],))
+            logger.info(
+                f"Deleted {excess_count} oldest block(s) to maintain the limit of 1000 blocks."
+            )
+
+    except Exception as e:
+        logger.error(f"Database error: {e}")
+    finally:
+        conn.close()
+
+
+def detect_reorg():
+    """
+    Detects a blockchain reorganization by finding a potential fork point.
+    Returns the fork point block number if a fork is detected, otherwise returns None.
+
+    :return: Block number of the fork point, or None if no fork is detected.
+    """
+    # Constants
+    BLOCKBOOK_API_URL = 'https://blockbook.ranchimall.net/'
+    API_VERIFY = True
+    ROLLBACK_BUFFER = 2  # Number of blocks before the fork point for rollback
+
+    try:
+        # Connect to the system database to get the last scanned block
+        logger.info("Connecting to the system database to fetch the last scanned block...")
+        conn = create_database_connection('system_dbs', {'db_name': 'system'})
+        result = conn.execute("SELECT value FROM systemData WHERE attribute = %s", ('lastblockscanned',))
+        row = result.fetchone()
+        conn.close()
+
+        if row is None:
+            logger.error("No last scanned block found in the system database. Exiting detection.")
             return None
 
-        if 'transactions' not in response_data:
-            return float(contractStructure['price'])
+        try:
+            latest_block = int(row[0])
+            logger.info(f"Last scanned block retrieved: {latest_block}")
+        except ValueError:
+            logger.error("Invalid block number in the system database. Exiting detection.")
+            return None
 
-        transactions = response_data['transactions']
-        for transaction_hash in transactions:
-            transaction_url = f'{apiUrl}api/v1/tx/{transaction_hash}'
-            transaction_response = await send_api_request(transaction_url)
-            if transaction_response is None:
-                continue
+        block_number = latest_block
+        while block_number > 0:
+            logger.info(f"Fetching local block hash for block number: {block_number}")
+            conn = create_database_connection('latest_cache', {'db_name': 'latestCache'})
+            result = conn.execute("SELECT blockHash FROM RecentBlocks WHERE blockNumber = %s", (block_number,))
+            local_row = result.fetchone()
+            conn.close()
 
-            transaction = transaction_response
-            floData = transaction.get('floData', None)
+            if local_row is None:
+                logger.error(f"No data found for block {block_number} in recentBlocks. Exiting detection.")
+                return None  # No block data available locally
 
-            if not floData or transaction['time'] >= blockinfo['time']:
-                continue
+            local_block_hash = local_row[0]
+            logger.info(f"Local block hash for block {block_number}: {local_block_hash}")
 
+            # Fetch the block from Blockbook API
             try:
-                sender_address, receiver_address = find_sender_receiver(transaction)
-                assert receiver_address == contractStructure['contractAddress']
-                assert sender_address == oracle_address
+                logger.info(f"Fetching block hash from Blockbook API for block number: {block_number}")
+                api_url = f'{BLOCKBOOK_API_URL}api/block/{block_number}'
+                logger.info(f"API Request URL: {api_url}")
 
-                floData = json.loads(floData)
-                assert floData['price-update']['contract-name'] == contractStructure['contractName']
-                assert floData['price-update']['contract-address'] == contractStructure['contractAddress']
+                response = requests.get(api_url, verify=API_VERIFY, timeout=RETRY_TIMEOUT_SHORT)
+                response.raise_for_status()  # Raise HTTP errors
+                response_json = response.json()
 
-                return float(floData['price-update']['price'])
-            except Exception as e:
-                print(f"Error processing transaction: {e}")
+                if "hash" in response_json:
+                    blockbook_hash = response_json["hash"]
+                    logger.info(f"Blockbook hash for block {block_number}: {blockbook_hash}")
+                else:
+                    logger.error(f"Missing 'hash' key in Blockbook API response: {response_json}")
+                    return None
+
+                # Check if the local block matches Blockbook's hash
+                if local_block_hash == blockbook_hash:
+                    logger.info(f"Block {block_number} matches between local and Blockbook. No reorg detected.")
+                    return None  # No reorg detected
+                else:
+                    logger.warning(f"Reorg detected at block {block_number}. Local hash: {local_block_hash}, Blockbook hash: {blockbook_hash}")
+                    return block_number - ROLLBACK_BUFFER
+
+            except requests.RequestException as e:
+                logger.error(f"Error connecting to Blockbook API: {e}")
+                time.sleep(2)
                 continue
 
-        # If no matching transaction is found, return the default price
-        return float(contractStructure['price'])
+            except Exception as e:
+                logger.error(f"Unexpected error during Blockbook API call: {e}")
+                return None
+
     except Exception as e:
-        print(f"Error in fetch_dynamic_swap_price: {e}")
+        logger.error(f"Unexpected error during reorg detection: {e}")
         return None
 
 
 
-def find_sender_receiver(transaction_data):
-    # Create vinlist and outputlist
-    vinlist = []
-    querylist = []
-
-    #totalinputval = 0
-    #inputadd = ''
-
-    # todo Rule 40 - For each vin, find the feeding address and the fed value. Make an inputlist containing [inputaddress, n value]
-    for vin in transaction_data["vin"]:
-        vinlist.append([vin["addr"], float(vin["value"])])
-
-    totalinputval = float(transaction_data["valueIn"])
-
-    # todo Rule 41 - Check if all the addresses in a transaction on the input side are the same
-    for idx, item in enumerate(vinlist):
-        if idx == 0:
-            temp = item[0]
-            continue
-        if item[0] != temp:
-            print(f"System has found more than one address as part of vin. Transaction {transaction_data['txid']} is rejected")
-            return 0
-
-    inputlist = [vinlist[0][0], totalinputval]
-    inputadd = vinlist[0][0]
-
-    # todo Rule 42 - If the number of vout is more than 2, reject the transaction
-    if len(transaction_data["vout"]) > 2:
-        print(f"System has found more than 2 address as part of vout. Transaction {transaction_data['txid']} is rejected")
-        return 0
-
-    # todo Rule 43 - A transaction accepted by the system has two vouts, 1. The FLO address of the receiver
-    #      2. Flo address of the sender as change address.  If the vout address is change address, then the other adddress
-    #     is the recevier address
-
-    outputlist = []
-    addresscounter = 0
-    inputcounter = 0
-    for obj in transaction_data["vout"]:
-        if obj["scriptPubKey"]["type"] == "pubkeyhash":
-            addresscounter = addresscounter + 1
-            if inputlist[0] == obj["scriptPubKey"]["addresses"][0]:
-                inputcounter = inputcounter + 1
-                continue
-            outputlist.append([obj["scriptPubKey"]["addresses"][0], obj["value"]])
-
-    if addresscounter == inputcounter:
-        outputlist = [inputlist[0]]
-    elif len(outputlist) != 1:
-        print(f"Transaction's change is not coming back to the input address. Transaction {transaction_data['txid']} is rejected")
-        return 0
-    else:
-        outputlist = outputlist[0]
-
-    return inputlist[0], outputlist[0]
-
-async def fetch_contract_status_time_info(contractName, contractAddress):
-    try:
-        # Connect to the system database asynchronously
-        conn = await get_mysql_connection('system', USE_ASYNC=True)  # Use async connection pool
-
-        async with conn.cursor() as cursor:
-            # Query to fetch contract status and time info
-            query = """
-                SELECT status, incorporationDate, expiryDate, closeDate 
-                FROM activecontracts 
-                WHERE contractName = %s AND contractAddress = %s 
-                ORDER BY id DESC 
-                LIMIT 1
-            """
-            await cursor.execute(query, (contractName, contractAddress))
-            contract_status_time_info = await cursor.fetchone()
-
-        # Return the result or an empty list if no data is found
-        return contract_status_time_info if contract_status_time_info else []
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error while fetching contract status and time info: {e}")
-        return []
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return []
-    finally:
-        # Ensure that the connection is properly released
-        await conn.commit()
-
-
-
-def checkIF_commitee_trigger_tranasaction(transactionDetails):
-    if transactionDetails[3] == 'trigger':
-        pass
-
-async def transaction_post_processing(transactionJsonData):
-    rowarray_list = []
-
-    for row in transactionJsonData:
-        transactions_object = {}
-        parsedFloData = json.loads(row[1])
-        transactionDetails = json.loads(row[0])
-        
-        if row[3] in internalTransactionTypes or (row[3] == 'trigger' and row[8] != 'committee'):
-            internal_info = {
-                'senderAddress': row[4],
-                'receiverAddress': row[5],
-                'tokenAmount': row[6],
-                'tokenIdentification': row[7],
-                'contractName': parsedFloData['contractName'],
-                'transactionTrigger': transactionDetails['txid'],
-                'time': transactionDetails['time'],
-                'type': row[3],
-                'onChain': False
-            }
-            transactions_object = internal_info
-        else:
-            transactions_object = {**parsedFloData, **transactionDetails}
-            # Awaiting the asynchronous update_transaction_confirmations function
-            transactions_object = await update_transaction_confirmations(transactions_object)
-            transactions_object['onChain'] = True
-        
-        rowarray_list.append(transactions_object)
-
-    return rowarray_list
-
-
-
-def standardize_db_name(db_name):
-    """
-    Ensures the database name has the proper prefix and suffix.
-
-    Args:
-        db_name (str): The logical database name.
-
-    Returns:
-        str: The standardized database name.
-    """
-    if not (db_name.startswith(f"{mysql_config.database_prefix}_") and db_name.endswith("_db")):
-        db_name = f"{mysql_config.database_prefix}_{db_name}_db"
-    return db_name
+#ENHANCEMENTS END
 
 
 
 
-async def fetch_transactions_from_token(token_name, floAddress, limit=None):
-    """
-    Fetch transactions for a specific token and FLO address.
+RETRY_TIMEOUT_LONG = 30 * 60 # 30 mins
+RETRY_TIMEOUT_SHORT = 60 # 1 min
+DB_RETRY_TIMEOUT = 60 # 60 seconds
 
-    Args:
-        token_name (str): The name of the token.
-        floAddress (str): The FLO address.
-        limit (int, optional): Maximum number of transactions to fetch.
 
-    Returns:
-        list: List of transactions for the token.
-    """
-    token_db_name = standardize_db_name(token_name)
+def newMultiRequest(apicall):
+    current_server = serverlist[0]  # Start with the first server
+    retry_count = 0
+
+    while True:  # Infinite loop
+        try:
+            # Add a timeout of 10 seconds
+            response = requests.get(f"{current_server}api/v1/{apicall}", verify=API_VERIFY, timeout=RETRY_TIMEOUT_SHORT)
+            logger.info(f"Called the API {current_server}api/v1/{apicall}")
+            if response.status_code == 200:
+                try:
+                    return response.json()  # Attempt to parse the JSON response
+                except ValueError as e:
+                    logger.error(f"Failed to parse JSON response: {e}")
+                    raise ValueError("Invalid JSON response received.")
+            else:
+                logger.warning(f"Non-200 status code received: {response.status_code}")
+                logger.warning(f"Response content: {response.content}")
+                raise requests.exceptions.HTTPError(f"HTTP {response.status_code}")
+
+        except requests.exceptions.RequestException as e:
+            logger.error(f"Request exception: {e}. Switching server...")
+        except Exception as e:
+            logger.error(f"Unhandled exception: {e}. Switching server...")
+
+        # Switch to the next server
+        current_server = switchNeturl(current_server)
+        retry_count += 1
+        logger.info(f"Switched to {current_server}. Retrying... Attempt #{retry_count}")
+        time.sleep(2)  # Wait before retrying
+
+
+
+def pushData_SSEapi(message):
+    '''signature = pyflo.sign_message(message.encode(), privKey)
+    headers = {'Accept': 'application/json', 'Content-Type': 'application/json', 'Signature': signature}
 
     try:
-        # Acquire a connection using `async with` to manage cleanup
-        async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn:
-            # Create a cursor using `async with` for cleanup
-            async with conn.cursor(dictionary=True) as cursor:
-                # Query to fetch transactions
-                query = """
-                    SELECT jsonData, parsedFloData, time, transactionType, sourceFloAddress, destFloAddress, 
-                           transferAmount, %s AS token, '' AS transactionSubType 
-                    FROM transactionHistory 
-                    WHERE sourceFloAddress = %s OR destFloAddress = %s
-                """
-                parameters = [token_name, floAddress, floAddress]
+        r = requests.post(sseAPI_url, json={'message': '{}'.format(message)}, headers=headers)
+    except:
+    logger.error("couldn't push the following message to SSE api {}".format(message))'''
+    print('')
 
-                # Add LIMIT clause if provided
-                if limit is not None:
-                    query += " LIMIT %s"
-                    parameters.append(limit)
-
-                # Execute the query and fetch all results
-                await cursor.execute(query, parameters)
-                return await cursor.fetchall()
-
-    except Exception as e:
-        # Log the error and re-raise it
-        logger.error(f"Error in fetch_transactions_from_token: {e}", exc_info=True)
-        raise
-
-
-async def fetch_token_transactions(tokens, senderFloAddress=None, destFloAddress=None, limit=None, use_and=False):
-    """
-    Fetch transactions for multiple tokens (or a single token).
-
-    Args:
-        tokens (list or str): List of token names or a single token name.
-        senderFloAddress (str, optional): Sender FLO address.
-        destFloAddress (str, optional): Destination FLO address.
-        limit (int, optional): Maximum number of transactions.
-        use_and (bool, optional): Use AND or OR for filtering.
-
-    Returns:
-        list: Combined list of transactions for all tokens.
-    """
-    # Automatically convert a single token name into a list
-    if isinstance(tokens, str):
-        tokens = [tokens]
-
-    if not tokens or not isinstance(tokens, list):
-        return jsonify(description="Invalid or missing tokens"), 400
-
-    try:
-        # Fetch transactions in parallel for all tokens
-        tasks = [
-            fetch_transactions_from_token(
-                token,
-                senderFloAddress or destFloAddress,  # Use either sender or destination address
-                limit
-            )
-            for token in tokens
-        ]
-        results = await asyncio.gather(*tasks)
-
-        # Combine and process results
-        all_transactions = []
-        for result in results:
-            all_transactions.extend(result)
-
-        # Post-process and return transactions
-        return await transaction_post_processing(all_transactions)
-
-    except Exception as e:
-        print(f"Unexpected error while fetching token transactions: {e}")
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-
-
-async def fetch_contract_transactions(contractName, contractAddress, _from=0, to=100, USE_ASYNC=False):
-    """
-    Fetches transactions related to a smart contract and associated tokens asynchronously.
-    
-    Args:
-        contractName (str): Name of the smart contract.
-        contractAddress (str): Address of the smart contract.
-        _from (int, optional): Starting index for transactions. Defaults to 0.
-        to (int, optional): Ending index for transactions. Defaults to 100.
-        USE_ASYNC (bool, optional): Flag to use async connection.
-
-    Returns:
-        list: Processed transactions.
-    """
-    try:
-        # Standardize smart contract database name
-        sc_db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-
-        # Fetch contract structure asynchronously
-        contractStructure = await fetchContractStructure(contractName, contractAddress)
-        if not contractStructure:
-            return jsonify(description="Invalid contract structure"), 404
-
-        transactionJsonData = []
-        creation_tx_query = """
-            SELECT jsonData, parsedFloData, time, transactionType, sourceFloAddress, destFloAddress, 
-                   transferAmount, '' AS token, transactionSubType 
-            FROM contractTransactionHistory
-            ORDER BY id
-            LIMIT 1;
-        """
-
-        # Open the connection asynchronously (using the appropriate connection pool)
-        conn_sc = await get_mysql_connection(sc_db_name, USE_ASYNC=USE_ASYNC)
-        async with conn_sc.cursor() as cursor_sc:
-            # Fetch creation transaction asynchronously
-            await cursor_sc.execute(creation_tx_query)
-            creation_tx = await cursor_sc.fetchall()
-            transactionJsonData = creation_tx
-
-            # Fetch token transactions concurrently for continuous or one-time event contracts
-            if contractStructure['contractType'] == 'continuos-event':
-                token1 = contractStructure['accepting_token']
-                token2 = contractStructure['selling_token']
-
-                # Fetch transactions for token1 and token2 concurrently
-                transaction_results_token1, transaction_results_token2 = await asyncio.gather(
-                    fetch_token_transactions_for_contract(token1, sc_db_name, _from, to, USE_ASYNC),
-                    fetch_token_transactions_for_contract(token2, sc_db_name, _from, to, USE_ASYNC)
-                )
-
-                # Combine results for token1 and token2
-                transactionJsonData += transaction_results_token1 + transaction_results_token2
-
-            elif contractStructure['contractType'] == 'one-time-event':
-                token1 = contractStructure['tokenIdentification']
-
-                # Fetch transactions for one-time event contract
-                result = await fetch_token_transactions_for_contract(token1, sc_db_name, _from, to, USE_ASYNC)
-                transactionJsonData += result
-
-        # Post-process and return transactions
-        return await transaction_post_processing(transactionJsonData)
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error while fetching contract transactions: {e}")
-        return jsonify(description="Database error"), 500
-    except Exception as e:
-        print(f"Unexpected error: {e}")
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-async def fetch_token_transactions_for_contract(token_name, sc_db_name, _from, to, USE_ASYNC=False):
-    """
-    Fetches transactions for a specific token and smart contract database asynchronously.
-
-    Args:
-        token_name (str): The name of the token.
-        sc_db_name (str): The name of the smart contract database.
-        _from (int): Starting index for transactions.
-        to (int): Ending index for transactions.
-        USE_ASYNC (bool, optional): Flag to use async connection.
-
-    Returns:
-        list: List of transactions for the token.
-    """
-    token_db_name = standardize_db_name(token_name)
-    try:
-        # Open separate connections for sc_db_name and token_db_name
-        conn_token = await get_mysql_connection(token_db_name, USE_ASYNC=USE_ASYNC)
-        conn_sc = await get_mysql_connection(sc_db_name, USE_ASYNC=USE_ASYNC)
-
-        # Fetch data from both connections and perform the join in-memory
-        async with conn_sc.cursor(dictionary=True) as cursor_sc, conn_token.cursor(dictionary=True) as cursor_token:
-            # Fetch data from contractTransactionHistory (sc_db_name)
-            query_sc = """
-                SELECT transactionHash, transactionSubType, id
-                FROM contractTransactionHistory
-                WHERE id BETWEEN %s AND %s
-            """
-            await cursor_sc.execute(query_sc, (_from, to))
-            sc_transactions = await cursor_sc.fetchall()
-
-            # Fetch data from transactionHistory (token_db_name)
-            transaction_hashes = tuple(tx['transactionHash'] for tx in sc_transactions)
-            query_token = f"""
-                SELECT jsonData, parsedFloData, time, transactionType, sourceFloAddress, destFloAddress, 
-                       transferAmount, '{token_name}' AS token
-                FROM transactionHistory
-                WHERE transactionHash IN %s
-            """
-            await cursor_token.execute(query_token, (transaction_hashes,))
-            token_transactions = await cursor_token.fetchall()
-
-            # Combine results from both queries
-            combined_transactions = []
-            for sc_tx in sc_transactions:
-                matching_tx = next((tx for tx in token_transactions if tx['transactionHash'] == sc_tx['transactionHash']), None)
-                if matching_tx:
-                    combined_tx = {**matching_tx, 'transactionSubType': sc_tx['transactionSubType']}
-                    combined_transactions.append(combined_tx)
-
-        return combined_transactions
-
-    except aiomysql.MySQLError as e:
-        print(f"Error fetching transactions for token {token_name}: {e}")
-        return []
-
-
-async def fetch_swap_contract_transactions(contractName, contractAddress, transactionHash=None, USE_ASYNC=False):
-    """
-    Fetches swap contract transactions involving two tokens asynchronously.
-
-    Args:
-        contractName (str): Name of the swap contract.
-        contractAddress (str): Address of the swap contract.
-        transactionHash (str, optional): Specific transaction hash to filter transactions.
-        USE_ASYNC (bool, optional): Whether to use async connection for database interactions.
-
-    Returns:
-        list: Processed transactions.
-    """
-    try:
-        # Standardize smart contract database name
-        sc_db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-
-        # Fetch contract structure
-        contractStructure = await fetchContractStructure(contractName, contractAddress)
-        if not contractStructure:
-            return jsonify(description="Invalid contract structure"), 404
-
-        # Get token names
-        token1 = contractStructure['accepting_token']
-        token2 = contractStructure['selling_token']
-
-        # Fetch contract transactions from contractTransactionHistory
-        contract_transactions_query = """
-            SELECT transactionHash, transactionSubType
-            FROM contractTransactionHistory
-        """
-        if transactionHash:
-            contract_transactions_query += " WHERE transactionHash = %s"
-
-        # Open connection to smart contract database asynchronously
-        async with await get_mysql_connection(sc_db_name, USE_ASYNC=USE_ASYNC) as conn_sc:
-            async with conn_sc.cursor(dictionary=True) as cursor_sc:
-                # Execute contract transactions query
-                if transactionHash:
-                    await cursor_sc.execute(contract_transactions_query, (transactionHash,))
-                else:
-                    await cursor_sc.execute(contract_transactions_query)
-
-                contract_transactions = await cursor_sc.fetchall()
-                transaction_hashes = [tx["transactionHash"] for tx in contract_transactions]
-
-        # Open connections to token databases concurrently
-        async with await get_mysql_connection(standardize_db_name(token1), USE_ASYNC=USE_ASYNC) as conn_token1, \
-                   await get_mysql_connection(standardize_db_name(token2), USE_ASYNC=USE_ASYNC) as conn_token2:
-            
-            # Fetch transactions for token1 and token2 concurrently
-            token1_query = f"""
-                SELECT jsonData, parsedFloData, time, transactionType, sourceFloAddress, destFloAddress, 
-                       transferAmount, '{token1}' AS token 
-                FROM transactionHistory
-                WHERE transactionHash IN ({','.join(['%s'] * len(transaction_hashes))})
-            """
-            token2_query = f"""
-                SELECT jsonData, parsedFloData, time, transactionType, sourceFloAddress, destFloAddress, 
-                       transferAmount, '{token2}' AS token 
-                FROM transactionHistory
-                WHERE transactionHash IN ({','.join(['%s'] * len(transaction_hashes))})
-            """
-
-            async with conn_token1.cursor(dictionary=True) as cursor_token1, \
-                       conn_token2.cursor(dictionary=True) as cursor_token2:
-                await asyncio.gather(
-                    cursor_token1.execute(token1_query, transaction_hashes),
-                    cursor_token2.execute(token2_query, transaction_hashes)
-                )
-
-                token1_transactions, token2_transactions = await asyncio.gather(
-                    cursor_token1.fetchall(),
-                    cursor_token2.fetchall()
-                )
-
-        # Combine and post-process transactions
-        all_transactions = token1_transactions + token2_transactions
-        for tx in all_transactions:
-            for contract_tx in contract_transactions:
-                if tx["transactionHash"] == contract_tx["transactionHash"]:
-                    tx["transactionSubType"] = contract_tx["transactionSubType"]
-                    break
-
-        # Return the processed transactions
-        return await transaction_post_processing(all_transactions)
-
-    except aiomysql.MySQLError as e:
-        logger.error(f"Database error while fetching swap contract transactions: {e}", exc_info=True)
-        return jsonify(description="Database error"), 500
-    except Exception as e:
-        logger.error(f"Unexpected error: {e}", exc_info=True)
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-
-
-def sort_transactions(transactionJsonData):
-    transactionJsonData = sorted(transactionJsonData, key=lambda x: x['time'], reverse=True)
-    return transactionJsonData
 
 def process_committee_flodata(flodata):
     flo_address_list = []
     try:
         contract_committee_actions = flodata['token-tracker']['contract-committee']
     except KeyError:
-        print('Flodata related to contract committee')
+        logger.info('Flodata related to contract committee')
     else:
         # Adding first and removing later to maintain consistency and not to depend on floData for order of execution
         for action in contract_committee_actions.keys():
@@ -1169,3290 +255,3174 @@ def process_committee_flodata(flodata):
     finally:
         return flo_address_list
 
+"""  ?NOT USED?
+def refresh_committee_list_old(admin_flo_id, api_url, blocktime):
+    response = requests.get(f'{api_url}api/v1/address/{admin_flo_id}', verify=API_VERIFY)
+    if response.status_code == 200:
+        response = response.json()
+    else:
+        logger.info('Response from the Blockbook API failed')
+        sys.exit(0)
 
-async def refresh_committee_list(admin_flo_id, api_url, blocktime):
+    committee_list = []
+    response['transactions'].reverse()
+    for idx, transaction in enumerate(response['transactions']):
+        transaction_info = requests.get(f'{api_url}api/v1/tx/{transaction}', verify=API_VERIFY)
+        if transaction_info.status_code == 200:
+            transaction_info = transaction_info.json()
+            if transaction_info['vin'][0]['addresses'][0]==admin_flo_id and transaction_info['blocktime']<=blocktime:
+                try:
+                    tx_flodata = json.loads(transaction_info['floData'])
+                    committee_list += process_committee_flodata(tx_flodata)
+                except:
+                    continue
+    return committee_list
+"""
+
+
+def refresh_committee_list(admin_flo_id, api_url, blocktime):
     committee_list = []
     latest_param = 'true'
     mempool_param = 'false'
     init_id = None
 
-    async def process_transaction(transaction_info):
+    def process_transaction(transaction_info):
         if 'isCoinBase' in transaction_info or transaction_info['vin'][0]['addresses'][0] != admin_flo_id or transaction_info['blocktime'] > blocktime:
             return
         try:
             tx_flodata = json.loads(transaction_info['floData'])
             committee_list.extend(process_committee_flodata(tx_flodata))
-        except Exception as e:
-            print(f"Error processing transaction: {e}")
+        except:
+            pass
 
-    async def send_api_request(url):
-        timeout = aiohttp.ClientTimeout(total=API_TIMEOUT)
-        try:
-            async with aiohttp.ClientSession(timeout=timeout) as session:
-                async with session.get(url, ssl=API_VERIFY) as response:
-                    if response.status == 200:
-                        return await response.json()
-                    else:
-                        print('Response from the Blockbook API failed')
-                        raise RuntimeError(f"API request failed with status {response.status}")
-        except asyncio.TimeoutError:
-            print(f"Request timed out after {API_TIMEOUT} seconds")
-            return ["timeout"]
-        except Exception as e:
-            print(f"Error during API request: {e}")
-            return None
+    def send_api_request(url):
+        while True:
+            try:
+                response = requests.get(url, verify=API_VERIFY)
+                if response.status_code == 200:
+                    return response.json()
+                else:
+                    logger.info(f'Response from the Blockbook API failed. Retry in {RETRY_TIMEOUT_SHORT}s')
+                    #sys.exit(0)
+                    time.sleep(RETRY_TIMEOUT_SHORT)
+            except:
+                logger.info(f'Fetch from the Blockbook API failed. Retry in {RETRY_TIMEOUT_LONG}s...')
+                time.sleep(RETRY_TIMEOUT_LONG)
 
     url = f'{api_url}api/v1/address/{admin_flo_id}?details=txs'
-    response = await send_api_request(url)
-    if response == ["timeout"]:
-        return ["timeout"]
-
-    if response is None:
-        return []
-
+    response = send_api_request(url)
     for transaction_info in response.get('txs', []):
-        await process_transaction(transaction_info)
+        process_transaction(transaction_info)
 
     while 'incomplete' in response:
         url = f'{api_url}api/v1/address/{admin_flo_id}/txs?latest={latest_param}&mempool={mempool_param}&before={init_id}'
-        response = await send_api_request(url)
-        if response == ["timeout"]:
-            return ["timeout"]
-        if response is None:
-            return []
+        response = send_api_request(url)
         for transaction_info in response.get('items', []):
-            await process_transaction(transaction_info)
+            process_transaction(transaction_info)
         if 'incomplete' in response:
             init_id = response['initItem']
 
     return committee_list
 
 
+def find_sender_receiver(transaction_data):
+    # Create vinlist and outputlist
+    vinlist = []
+    querylist = []
+
+    #totalinputval = 0
+    #inputadd = ''
+
+    # todo Rule 40 - For each vin, find the feeding address and the fed value. Make an inputlist containing [inputaddress, n value]
+    for vin in transaction_data["vin"]:
+        vinlist.append([vin["addresses"][0], float(vin["value"])])
+
+    totalinputval = float(transaction_data["valueIn"])
+
+    # todo Rule 41 - Check if all the addresses in a transaction on the input side are the same
+    for idx, item in enumerate(vinlist):
+        if idx == 0:
+            temp = item[0]
+            continue
+        if item[0] != temp:
+            logger.info(f"System has found more than one address as part of vin. Transaction {transaction_data['txid']} is rejected")
+            return 0
+
+    inputlist = [vinlist[0][0], totalinputval]
+    inputadd = vinlist[0][0]
+
+    # todo Rule 42 - If the number of vout is more than 2, reject the transaction
+    if len(transaction_data["vout"]) > 2:
+        logger.info(f"System has found more than 2 address as part of vout. Transaction {transaction_data['txid']} is rejected")
+        return 0
+
+    # todo Rule 43 - A transaction accepted by the system has two vouts, 1. The FLO address of the receiver
+    #      2. Flo address of the sender as change address.  If the vout address is change address, then the other adddress
+    #     is the recevier address
+
+    outputlist = []
+    addresscounter = 0
+    inputcounter = 0
+    for obj in transaction_data["vout"]:
+        addresscounter = addresscounter + 1
+        if inputlist[0] == obj["scriptPubKey"]["addresses"][0]:
+            inputcounter = inputcounter + 1
+            continue
+        outputlist.append([obj["scriptPubKey"]["addresses"][0], obj["value"]])
+
+    if addresscounter == inputcounter:
+        outputlist = [inputlist[0]]
+    elif len(outputlist) != 1:
+        logger.info(f"Transaction's change is not coming back to the input address. Transaction {transaction_data['txid']} is rejected")
+        return 0
+    else:
+        outputlist = outputlist[0]
+
+    return inputlist[0], outputlist[0]
 
 
-@app.route('/')
-async def welcome_msg():
-    return jsonify('Welcome to RanchiMall FLO Api v2')
+def check_database_existence(type, parameters):
+    """
+    Checks the existence of a MySQL database by attempting to connect to it.
 
+    Args:
+        type (str): Type of the database ('token', 'smart_contract').
+        parameters (dict): Parameters for constructing database names.
 
-@app.route('/api/v1.0/getSystemData', methods=['GET'])
-async def systemData():
+    Returns:
+        bool: True if the database exists, False otherwise.
+    """
+    
+    # Construct database name and URL
+    if type == 'token':
+        database_name = f"{mysql_config.database_prefix}_{parameters['token_name']}_db"
+    elif type == 'smart_contract':
+        database_name = f"{mysql_config.database_prefix}_{parameters['contract_name']}_{parameters['contract_address']}_db"
+    else:
+        raise ValueError(f"Unsupported database type: {type}")
+
+    # Create a temporary engine to check database existence
+    engine_url = f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{database_name}"
     try:
-        # Standardized database names
-        system_db_name = standardize_db_name("system")
-        latest_cache_db_name = standardize_db_name("latestCache")
+        engine = create_engine(engine_url, echo=False)
+        connection = engine.connect()
+        connection.close()
+        return True
+    except OperationalError:
+        return False
 
-        # Query for the number of FLO addresses in tokenAddress mapping
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                await cursor_system.execute('SELECT COUNT(DISTINCT tokenAddress) FROM tokenAddressMapping')
-                tokenAddressCount = (await cursor_system.fetchone())[0]
 
-                await cursor_system.execute('SELECT COUNT(DISTINCT token) FROM tokenAddressMapping')
-                tokenCount = (await cursor_system.fetchone())[0]
+def create_database_connection(type, parameters=None):
+    """
+    Creates a database connection using MySQL credentials from the config file.
 
-                await cursor_system.execute('SELECT COUNT(DISTINCT contractName) FROM contractAddressMapping')
-                contractCount = (await cursor_system.fetchone())[0]
+    Args:
+        type (str): Type of the database ('token', 'smart_contract', 'system_dbs', 'latest_cache').
+        parameters (dict, optional): Parameters for dynamic database names.
 
-                await cursor_system.execute("SELECT value FROM systemData WHERE attribute='lastblockscanned'")
-                lastscannedblock = int((await cursor_system.fetchone())[0])
+    Returns:
+        connection: SQLAlchemy connection object.
+    """
+    
+    # Map database type to naming logic
+    database_mapping = {
+        'token': lambda: f"{mysql_config.database_prefix}_{parameters['token_name']}_db",
+        'smart_contract': lambda: f"{mysql_config.database_prefix}_{parameters['contract_name']}_{parameters['contract_address']}_db",
+        'system_dbs': lambda: f"{mysql_config.database_prefix}_system_db",
+        'latest_cache': lambda: f"{mysql_config.database_prefix}_latestCache_db"
+    }
 
-        # Query for total number of validated blocks
-        async with await get_mysql_connection(latest_cache_db_name, USE_ASYNC=True) as conn_cache:
-            async with conn_cache.cursor() as cursor_cache:
-                await cursor_cache.execute('SELECT COUNT(DISTINCT blockNumber) FROM latestBlocks')
-                validatedBlockCount = (await cursor_cache.fetchone())[0]
+    # Validate and construct the database name
+    if type not in database_mapping:
+        raise ValueError(f"Unknown database type: {type}")
+    database_name = database_mapping[type]()
 
-                await cursor_cache.execute('SELECT COUNT(DISTINCT transactionHash) FROM latestTransactions')
-                validatedTransactionCount = (await cursor_cache.fetchone())[0]
+    # Create the database engine
+    echo_setting = True if type in ['token', 'smart_contract'] else False
+    engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{database_name}", echo=echo_setting)
 
-        # Return the system data as JSON
-        return jsonify(
-            systemAddressCount=tokenAddressCount,
-            systemBlockCount=validatedBlockCount,
-            systemTransactionCount=validatedTransactionCount,
-            systemSmartContractCount=contractCount,
-            systemTokenCount=tokenCount,
-            lastscannedblock=lastscannedblock,
-            result='ok'
+    # Connect to the database
+    return engine.connect()
+
+
+
+from sqlalchemy.exc import SQLAlchemyError
+
+def create_database_session_orm(type, parameters, base):
+    """
+    Creates a SQLAlchemy session for the specified database type, ensuring the database exists.
+
+    Args:
+        type (str): Type of the database ('token', 'smart_contract', 'system_dbs').
+        parameters (dict): Parameters for constructing database names.
+        base: SQLAlchemy declarative base for the ORM models.
+
+    Returns:
+        session: SQLAlchemy session object.
+    """
+    try:
+        # Construct database name based on type
+        if type == 'token':
+            database_name = f"{mysql_config.database_prefix}_{parameters['token_name']}_db"
+        elif type == 'smart_contract':
+            database_name = f"{mysql_config.database_prefix}_{parameters['contract_name']}_{parameters['contract_address']}_db"
+        elif type == 'system_dbs':
+            database_name = f"{mysql_config.database_prefix}_{parameters['db_name']}_db"
+        else:
+            raise ValueError(f"Unknown database type: {type}")
+
+        #logger.info(f"Database name constructed: {database_name}")
+
+        # Check if the database exists using information_schema
+        server_engine = create_engine(
+            f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/",
+            connect_args={"connect_timeout": DB_RETRY_TIMEOUT},  # 10 seconds timeout for connection
+            echo=False
         )
+        with server_engine.connect() as connection:
+            #logger.info(f"Checking existence of database '{database_name}'...")
+            db_exists = connection.execute(
+                "SELECT COUNT(*) FROM information_schema.schemata WHERE schema_name = %s",
+                (database_name,)
+            ).scalar()
 
-    except Exception as e:
-        logger.error(f"Error in systemData function: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR)
-
-
-
-
-
-
-@app.route('/api/v1.0/broadcastTx/<raw_transaction_hash>')
-async def broadcastTx(raw_transaction_hash):
-    try:
-        p1 = subprocess.run(['flo-cli',f"-datadir={FLO_DATA_DIR}",'sendrawtransaction',raw_transaction_hash], capture_output=True)
-        return jsonify(args=p1.args,returncode=p1.returncode,stdout=p1.stdout.decode(),stderr=p1.stderr.decode())
-    except Exception as e:
-        print("broadcastTx:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
-    
-
-@app.route('/api/v1.0/getTokenList', methods=['GET'])
-async def getTokenList():
-    if not is_backend_ready():
-        return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
-
-    try:
-        # Prefix and suffix for databases
-        database_prefix = f"{mysql_config.database_prefix}_"
-        database_suffix = "_db"
-
-        # Initialize token list
-        token_list = []
-
-        # Use `async with` to handle connection cleanup automatically
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Query to get all databases matching the prefix and suffix
-                query = f"SELECT SCHEMA_NAME FROM SCHEMATA WHERE SCHEMA_NAME LIKE '{database_prefix}%' AND SCHEMA_NAME LIKE '%{database_suffix}'"
-                await cursor.execute(query)
-                all_databases = [row[0] for row in await cursor.fetchall()]
-
-                # Separate token databases from smart contract databases
-                for db_name in all_databases:
-                    # Remove the prefix and suffix for parsing
-                    stripped_name = db_name[len(database_prefix):-len(database_suffix)]
-
-                    # Exclude "latestCache" and "system" databases
-                    if stripped_name in ["latestCache", "system"]:
-                        continue
-
-                    # Token databases will not contain an address-like string
-                    parts = stripped_name.split('_')
-                    if len(parts) == 1:  # Token databases have a single part (e.g., usd, inr)
-                        token_list.append(stripped_name)
-                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):
-                        # Smart contracts are excluded
-                        continue
-
-        # Return the token list in the original format
-        return jsonify(tokens=token_list, result='ok')
-
-    except Exception as e:
-        logger.error(f"getTokenList: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-@app.route('/api/v1.0/getTokenInfo', methods=['GET'])
-async def getTokenInfo():
-    try:
-        token = request.args.get('token')
-        if token is None:
-            return jsonify(result='error', description='token name hasn\'t been passed'), 400
-
-        # Standardize token database name
-        db_name = standardize_db_name(token)
-
-        # Connect to the token database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch incorporation details
-                query = "SELECT * FROM transactionHistory WHERE id = 1"
-                await cursor.execute(query)
-                incorporationRow = await cursor.fetchone()
-                if not incorporationRow:
-                    return jsonify(result='error', description='Incorporation details not found'), 404
-
-                # Fetch the number of distinct addresses
-                query = "SELECT COUNT(DISTINCT address) FROM activeTable"
-                await cursor.execute(query)
-                numberOf_distinctAddresses = (await cursor.fetchone())[0]
-
-                # Fetch the total number of transactions
-                query = "SELECT MAX(id) FROM transactionHistory"
-                await cursor.execute(query)
-                numberOf_transactions = (await cursor.fetchone())[0]
-
-                # Fetch associated contracts
-                query = """
-                    SELECT contractName, contractAddress, blockNumber, blockHash, transactionHash
-                    FROM tokenContractAssociation
-                """
-                await cursor.execute(query)
-                associatedContracts = await cursor.fetchall()
-
-        # Prepare associated contract list
-        associatedContractList = [
-            {
-                'contractName': item[0],
-                'contractAddress': item[1],
-                'blockNumber': item[2],
-                'blockHash': item[3],
-                'transactionHash': item[4],
-            }
-            for item in associatedContracts
-        ]
-
-        # Prepare the response
-        response = {
-            'result': 'ok',
-            'token': token,
-            'incorporationAddress': incorporationRow[1],
-            'tokenSupply': incorporationRow[3],
-            'time': incorporationRow[6],
-            'blockchainReference': incorporationRow[7],
-            'activeAddress_no': numberOf_distinctAddresses,
-            'totalTransactions': numberOf_transactions,
-            'associatedSmartContracts': associatedContractList,
-        }
-
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
-    except Exception as e:
-        logger.error(f"getTokenInfo: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-
-@app.route('/api/v1.0/getTokenTransactions', methods=['GET'])
-async def getTokenTransactions():
-    try:
-        token = request.args.get('token')
-        senderFloAddress = request.args.get('senderFloAddress')
-        destFloAddress = request.args.get('destFloAddress')
-        limit = request.args.get('limit')
-
-        if token is None:
-            return jsonify(result='error', description='token name hasn\'t been passed'), 400
-
-        # Standardize token database name
-        db_name = standardize_db_name(token)
-
-        # Connect to the token database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Build the base query
-                query = "SELECT jsonData, parsedFloData FROM transactionHistory"
-                conditions = []
-                params = []
-
-                # Add filters based on sender and destination addresses
-                if senderFloAddress and not destFloAddress:
-                    conditions.append("sourceFloAddress = %s")
-                    params.append(senderFloAddress)
-                elif not senderFloAddress and destFloAddress:
-                    conditions.append("destFloAddress = %s")
-                    params.append(destFloAddress)
-                elif senderFloAddress and destFloAddress:
-                    conditions.append("sourceFloAddress = %s AND destFloAddress = %s")
-                    params.extend([senderFloAddress, destFloAddress])
-
-                # Add conditions to the query
-                if conditions:
-                    query += " WHERE " + " AND ".join(conditions)
-
-                # Add ordering and limit
-                query += " ORDER BY id DESC"
-                if limit is not None:
-                    if not limit.isdigit():
-                        return jsonify(result='error', description='limit validation failed'), 400
-                    query += " LIMIT %s"
-                    params.append(int(limit))
-
-                # Execute the query asynchronously
-                await cursor.execute(query, params)
-                transactionJsonData = await cursor.fetchall()
-
-        # Process the results
-        rowarray_list = {}
-        for row in transactionJsonData:
-            transactions_object = {}
-            transactions_object['transactionDetails'] = json.loads(row[0])
-            transactions_object['transactionDetails'] = await update_transaction_confirmations(transactions_object['transactionDetails'])
-            transactions_object['parsedFloData'] = json.loads(row[1])
-            rowarray_list[transactions_object['transactionDetails']['txid']] = transactions_object
-
-        # Return the response
-        if not is_backend_ready():
-            return jsonify(result='ok', token=token, transactions=rowarray_list, warning=BACKEND_NOT_READY_WARNING), 206
-        else:
-            return jsonify(result='ok', token=token, transactions=rowarray_list), 200
-
-    except Exception as e:
-        logger.error(f"getTokenTransactions: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-@app.route('/api/v1.0/getTokenBalances', methods=['GET'])
-async def getTokenBalances():
-    try:
-        token = request.args.get('token')
-        if token is None:
-            return jsonify(result='error', description='token name hasn\'t been passed'), 400
-
-        # Standardize token database name
-        db_name = standardize_db_name(token)
-
-        # Connect to the token database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch address balances grouped by address asynchronously
-                query = "SELECT address, SUM(transferBalance) FROM activeTable GROUP BY address"
-                await cursor.execute(query)
-                addressBalances = await cursor.fetchall()
-
-        # Prepare the response
-        returnList = {address[0]: address[1] for address in addressBalances}
-
-        if not is_backend_ready():
-            return jsonify(result='ok', token=token, balances=returnList, warning=BACKEND_NOT_READY_WARNING), 206
-        else:
-            return jsonify(result='ok', token=token, balances=returnList), 200
-
-    except Exception as e:
-        logger.error(f"getTokenBalances: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-# FLO Address APIs
-@app.route('/api/v1.0/getFloAddressInfo', methods=['GET'])
-async def getFloAddressInfo():
-    try:
-        floAddress = request.args.get('floAddress')
-        if floAddress is None:
-            return jsonify(description='floAddress hasn\'t been passed'), 400
-
-        # Connect to the system database asynchronously
-        db_name = standardize_db_name("system")
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch associated tokens asynchronously
-                query = "SELECT token FROM tokenAddressMapping WHERE tokenAddress = %s"
-                await cursor.execute(query, (floAddress,))
-                tokenNames = await cursor.fetchall()
-
-                # Fetch incorporated contracts asynchronously
-                query = """
-                    SELECT contractName, status, tokenIdentification, contractType, transactionHash, blockNumber, blockHash 
-                    FROM activecontracts 
-                    WHERE contractAddress = %s
-                """
-                await cursor.execute(query, (floAddress,))
-                incorporatedContracts = await cursor.fetchall()
-
-        # Prepare token details by querying each token database separately asynchronously
-        detailList = {}
-        if tokenNames:
-            tasks = []
-            for token in tokenNames:
-                token_name = token[0]
-                token_db_name = standardize_db_name(token_name)
-
-                tasks.append(fetch_token_balance(token_name, token_db_name, floAddress))
-
-            # Run all tasks concurrently
-            token_balances = await asyncio.gather(*tasks)
-
-            # Add token balances to the details list
-            for balance in token_balances:
-                detailList.update(balance)
-
-        else:
-            # Address is not associated with any token
-            if not is_backend_ready():
-                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
+            if not db_exists:
+                logger.info(f"Database '{database_name}' does not exist. Creating it...")
+                connection.execute(f"CREATE DATABASE `{database_name}`")
+                logger.info(f"Database '{database_name}' created successfully.")
             else:
-                return jsonify(result='error', description='FLO address is not associated with any tokens'), 404
+                logger.info(f"Database '{database_name}' already exists.")
 
-        # Prepare contract details asynchronously
-        incorporatedSmartContracts = []
-        if incorporatedContracts:
-            for contract in incorporatedContracts:
-                tempdict = {
-                    'contractName': contract[0],
-                    'contractAddress': floAddress,
-                    'status': contract[1],
-                    'tokenIdentification': contract[2],
-                    'contractType': contract[3],
-                    'transactionHash': contract[4],
-                    'blockNumber': contract[5],
-                    'blockHash': contract[6],
-                }
-                incorporatedSmartContracts.append(tempdict)
-        else:
-            incorporatedSmartContracts = None
+        # Connect to the specific database and initialize tables
+        logger.info(f"Connecting to database '{database_name}'...")
+        engine = create_engine(
+            f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{database_name}",
+            connect_args={"connect_timeout": DB_RETRY_TIMEOUT},
+            echo=False
+        )
+        base.metadata.create_all(bind=engine)  # Create tables if they do not exist
+        session = sessionmaker(bind=engine)()
 
-        # Return the response
-        response = {
-            'result': 'ok',
-            'floAddress': floAddress,
-            'floAddressBalances': detailList,
-            'incorporatedSmartContracts': incorporatedSmartContracts,
-        }
+        logger.info(f"Session created for database '{database_name}' successfully.")
+        return session
 
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
+    except SQLAlchemyError as e:
+        logger.error(f"SQLAlchemy error occurred: {e}")
+        raise
     except Exception as e:
-        logger.error(f"getFloAddressInfo: {e}", exc_info=True)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
+        logger.error(f"Unexpected error occurred: {e}")
+        raise
 
 
 
-async def fetch_token_balance(token_name, floAddress):
+
+def delete_contract_database(parameters):
     """
-    Fetches the balance for a specific token in the provided token database.
+    Deletes a MySQL database for a smart contract if it exists.
 
     Args:
-        token_name (str): The name of the token.
-        floAddress (str): The FLO address to fetch the balance for.
-
-    Returns:
-        dict: A dictionary with the token balance.
+        parameters (dict): Parameters for constructing the database name.
+            Example: {'contract_name': 'example_contract', 'contract_address': '0x123abc'}
     """
-    try:
-        token_db_name = standardize_db_name(token_name)
-        
-        # Use `async with` for resource management
-        async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn_token:
-            async with conn_token.cursor() as cursor_token:
-
-                # Fetch balance for the token asynchronously
-                query = "SELECT SUM(transferBalance) FROM activeTable WHERE address = %s"
-                await cursor_token.execute(query, (floAddress,))
-                balance = (await cursor_token.fetchone())[0] or 0
-
-        return {token_name: {'balance': balance, 'token': token_name}}
-
-    except Exception as e:
-        print(f"Error fetching balance for token {token_name}: {e}")
-        return {token_name: {'balance': 0, 'token': token_name}}
-
-
-
-
-@app.route('/api/v1.0/getFloAddressBalance', methods=['GET'])
-async def getAddressBalance():
-    try:
-        floAddress = request.args.get('floAddress')
-        token = request.args.get('token')
-
-        if floAddress is None:
-            return jsonify(result='error', description='floAddress hasn\'t been passed'), 400
-
-        if token is None:
-            # If no specific token is provided, get balances for all associated tokens
-            db_name = standardize_db_name("system")
-            async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    # Fetch associated tokens asynchronously
-                    query = "SELECT token FROM tokenAddressMapping WHERE tokenAddress = %s"
-                    await cursor.execute(query, (floAddress,))
-                    tokenNames = [row[0] for row in await cursor.fetchall()]
-
-            if tokenNames:
-                # Use asyncio to fetch balances in parallel
-                tasks = [fetch_token_balance(token_name, floAddress) for token_name in tokenNames]
-                results = await asyncio.gather(*tasks)
-
-                # Combine results into detailList
-                detailList = {k: v for result in results for k, v in result.items()}
-
-                if not is_backend_ready():
-                    return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, floAddress=floAddress, floAddressBalances=detailList), 206
-                else:
-                    return jsonify(result='ok', floAddress=floAddress, floAddressBalances=detailList), 200
-
-            else:
-                # Address is not associated with any token
-                if not is_backend_ready():
-                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
-                else:
-                    return jsonify(result='error', description='FLO address is not associated with any tokens'), 404
-
-        else:
-            # If a specific token is provided, get the balance for that token
-            token_db_name = standardize_db_name(token)
-            async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    # Fetch balance for the address asynchronously
-                    query = "SELECT SUM(transferBalance) FROM activeTable WHERE address = %s"
-                    await cursor.execute(query, (floAddress,))
-                    balance = (await cursor.fetchone())[0] or 0
-
-            if not is_backend_ready():
-                return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, token=token, floAddress=floAddress, balance=balance), 206
-            else:
-                return jsonify(result='ok', token=token, floAddress=floAddress, balance=balance), 200
-
-    except Exception as e:
-        print("getAddressBalance:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-@app.route('/api/v1.0/getFloAddressTransactions', methods=['GET'])
-async def getFloAddressTransactions():
-    try:
-        floAddress = request.args.get('floAddress')
-        token = request.args.get('token')
-        limit = request.args.get('limit')
-
-        if floAddress is None:
-            return jsonify(result='error', description='floAddress has not been passed'), 400
-
-        # Handle token-specific or all-token scenarios
-        if token is None:
-            # Fetch all tokens associated with the floAddress
-            db_name = standardize_db_name("system")
-            async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    query = "SELECT token FROM tokenAddressMapping WHERE tokenAddress = %s"
-                    await cursor.execute(query, (floAddress,))
-                    tokenNames = await cursor.fetchall()
-
-        else:
-            # Check if the token database exists
-            token_db_name = standardize_db_name(token)
-            try:
-                async with await get_mysql_connection(token_db_name, USE_ASYNC=True):
-                    tokenNames = [(token,)]
-            except Exception:
-                if not is_backend_ready():
-                    return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
-                else:
-                    return jsonify(result='error', description='Token does not exist'), 404
-
-        # Process transactions for the tokens
-        if tokenNames:
-            allTransactionList = {}
-            tasks = []  # List to hold async tasks for fetching transactions
-
-            for token_row in tokenNames:
-                tokenname = token_row[0]
-                token_db_name = standardize_db_name(tokenname)
-
-                tasks.append(fetch_transactions_for_token(token_db_name, floAddress, limit))
-
-            # Run all tasks concurrently
-            transaction_data = await asyncio.gather(*tasks)
-
-            # Process fetched transactions
-            for data in transaction_data:
-                for row in data:
-                    transactions_object = {}
-                    transactions_object['transactionDetails'] = json.loads(row[0])
-                    transactions_object['transactionDetails'] = await update_transaction_confirmations(
-                        transactions_object['transactionDetails']
-                    )
-                    transactions_object['parsedFloData'] = json.loads(row[1])
-                    allTransactionList[transactions_object['transactionDetails']['txid']] = transactions_object
-
-            # Construct response based on token presence
-            response = {
-                'result': 'ok',
-                'floAddress': floAddress,
-                'transactions': allTransactionList
-            }
-            if token is not None:
-                response['token'] = token
-            if not is_backend_ready():
-                response['warning'] = BACKEND_NOT_READY_WARNING
-                return jsonify(response), 206
-            else:
-                return jsonify(response), 200
-
-        else:
-            # No token transactions associated with this address
-            if not is_backend_ready():
-                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(result='error', description='No token transactions present on this address'), 404
-
-    except Exception as e:
-        print("getFloAddressTransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-async def fetch_transactions_for_token(token_db_name, floAddress, limit):
-    """
-    Fetches transactions for a specific token database.
-
-    Args:
-        token_db_name (str): The token database name.
-        floAddress (str): The FLO address to filter transactions.
-        limit (int): The limit for the number of transactions.
-
-    Returns:
-        list: List of transactions for the token.
-    """
-    try:
-        async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn_token:
-            async with conn_token.cursor() as cursor_token:
-                # Build query to fetch transactions
-                query = """
-                    SELECT jsonData, parsedFloData 
-                    FROM transactionHistory 
-                    WHERE sourceFloAddress = %s OR destFloAddress = %s
-                    ORDER BY id DESC
-                """
-                params = (floAddress, floAddress)
-
-                if limit:
-                    query += " LIMIT %s"
-                    params = (floAddress, floAddress, int(limit))
-
-                await cursor_token.execute(query, params)
-                return await cursor_token.fetchall()
-
-    except Exception as e:
-        print(f"Error fetching transactions for token {token_db_name}: {e}")
-        return []
-
-
-
     
+    # Construct the database name
+    database_name = f"{mysql_config.database_prefix}_{parameters['contract_name']}_{parameters['contract_address']}_db"
 
-# SMART CONTRACT APIs
-@app.route('/api/v1.0/getSmartContractList', methods=['GET'])
-async def getContractList():
-    try:
-        # Get query parameters
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        # Standardize system database name
-        system_db_name = standardize_db_name("system")
-
-        # Initialize contract list
-        contractList = []
-
-        # Connect to the system database asynchronously and manage it with async context
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-
-                # Build the query dynamically based on input parameters
-                query = "SELECT * FROM activecontracts"
-                conditions = []
-                params = []
-
-                if contractName:
-                    conditions.append("contractName=%s")
-                    params.append(contractName)
-
-                if contractAddress:
-                    conditions.append("contractAddress=%s")
-                    params.append(contractAddress)
-
-                if conditions:
-                    query += " WHERE " + " AND ".join(conditions)
-
-                # Execute the query asynchronously
-                await cursor.execute(query, tuple(params))
-                allcontractsDetailList = await cursor.fetchall()
-
-                # Process the results asynchronously
-                for contract in allcontractsDetailList:
-                    contractDict = {
-                        'contractName': contract[1],
-                        'contractAddress': contract[2],
-                        'status': contract[3],
-                        'tokenIdentification': contract[4],
-                        'contractType': contract[5],
-                        'transactionHash': contract[6],
-                        'blockNumber': contract[7],
-                        'incorporationDate': contract[8],
-                    }
-                    if contract[9]:
-                        contractDict['expiryDate'] = contract[9]
-                    if contract[10]:
-                        contractDict['closeDate'] = contract[10]
-
-                    contractList.append(contractDict)
-
-        # Check backend readiness and return response
-        if not is_backend_ready():
-            return jsonify(smartContracts=contractList, result='ok', warning=BACKEND_NOT_READY_WARNING), 206
-        else:
-            return jsonify(smartContracts=contractList, result='ok'), 200
-
-    except Exception as e:
-        print("getContractList:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
+    # Check if the database exists
+    if check_database_existence('smart_contract', parameters):
+        # Connect to MySQL server (without specifying a database)
+        engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/", echo=False)
+        with engine.connect() as connection:
+            # Drop the database
+            connection.execute(f"DROP DATABASE `{database_name}`")
+            logger.info(f"Database '{database_name}' has been deleted.")
+    else:
+        logger.info(f"Database '{database_name}' does not exist.")
 
 
-    
-@app.route('/api/v1.0/getSmartContractInfo', methods=['GET'], endpoint='getSmartContractInfoV1')
-async def getContractInfo():
-    logger.info("Entering getContractInfo function")
-    try:
-        # Get query parameters
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        if not contractName:
-            logger.error("Contract name is missing")
-            return jsonify(result='error', description="Smart Contract's name hasn't been passed"), 400
-        if not contractAddress:
-            logger.error("Contract address is missing")
-            return jsonify(result='error', description="Smart Contract's address hasn't been passed"), 400
-
-        # Standardize the smart contract database name
-        contract_db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-        logger.info(f"Standardized contract database name: {contract_db_name}")
-
-        # Initialize response dictionary
-        returnval = {}
-
-        # Fetch contract structure
+def add_transaction_history(token_name, sourceFloAddress, destFloAddress, transferAmount, blockNumber, blockHash, blocktime, transactionHash, jsonData, transactionType, parsedFloData):
+    while True:
         try:
-            async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as contract_conn:
-                async with contract_conn.cursor() as cursor:
-                    await cursor.execute("SELECT attribute, value FROM contractstructure")
-                    result = await cursor.fetchall()
-                    if not result:
-                        logger.error("No contract structure found")
-                        return jsonify(result='error', description="No contract structure found for the specified smart contract"), 404
+            session = create_database_session_orm('token', {'token_name': token_name}, TokenBase)
+            blockchainReference = neturl + 'tx/' + transactionHash
+            session.add(TransactionHistory(
+                                            sourceFloAddress=sourceFloAddress, 
+                                            destFloAddress=destFloAddress,
+                                            transferAmount=transferAmount,
+                                            blockNumber=blockNumber,
+                                            blockHash=blockHash,
+                                            time=blocktime,
+                                            transactionHash=transactionHash,
+                                            blockchainReference=blockchainReference,
+                                            jsonData=jsonData,
+                                            transactionType=transactionType,
+                                            parsedFloData=parsedFloData
+                                        ))
+            session.commit()
+            session.close()
+            break
+        except:
+            logger.info(f"Unable to connect to 'token({token_name})' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
 
-                    # Process contract structure data
-                    contractStructure = {}
-                    conditionDict = {}
-                    for item in result:
-                        if item[0] == 'exitconditions':
-                            conditionDict[len(conditionDict)] = item[1]
+
+def add_contract_transaction_history(contract_name, contract_address, transactionType, transactionSubType, sourceFloAddress, destFloAddress, transferAmount, blockNumber, blockHash, blocktime, transactionHash, jsonData, parsedFloData):
+    while True:
+        try:
+            session = create_database_session_orm('smart_contract', {'contract_name': f"{contract_name}", 'contract_address': f"{contract_address}"}, ContractBase)
+            blockchainReference = neturl + 'tx/' + transactionHash
+            session.add(ContractTransactionHistory(transactionType=transactionType,
+                                                    sourceFloAddress=sourceFloAddress,
+                                                    destFloAddress=destFloAddress,
+                                                    transferAmount=transferAmount,
+                                                    blockNumber=blockNumber,
+                                                    blockHash=blockHash,
+                                                    time=blocktime,
+                                                    transactionHash=transactionHash,
+                                                    blockchainReference=blockchainReference,
+                                                    jsonData=jsonData,
+                                                    parsedFloData=parsedFloData
+                                                    ))
+            session.commit()
+            session.close()
+            break
+        except:
+            logger.info(f"Unable to connect to 'smart_contract({contract_name})' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+
+def rejected_transaction_history(transaction_data, parsed_data, sourceFloAddress, destFloAddress, rejectComment):
+    while True:
+        try:
+            session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+            blockchainReference = neturl + 'tx/' + transaction_data['txid']
+            session.add(RejectedTransactionHistory(tokenIdentification=parsed_data['tokenIdentification'],
+                                                sourceFloAddress=sourceFloAddress, destFloAddress=destFloAddress,
+                                                transferAmount=parsed_data['tokenAmount'],
+                                                blockNumber=transaction_data['blockheight'],
+                                                blockHash=transaction_data['blockhash'],
+                                                time=transaction_data['time'],
+                                                transactionHash=transaction_data['txid'],
+                                                blockchainReference=blockchainReference,
+                                                jsonData=json.dumps(transaction_data),
+                                                rejectComment=rejectComment,
+                                                transactionType=parsed_data['type'],
+                                                parsedFloData=json.dumps(parsed_data)
+                                                ))
+            session.commit()
+            session.close()
+            break
+        except:
+            logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+
+def rejected_contract_transaction_history(transaction_data, parsed_data, transactionType, contractAddress, sourceFloAddress, destFloAddress, rejectComment):
+    while True:
+        try:
+            session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+            blockchainReference = neturl + 'tx/' + transaction_data['txid']
+            session.add(RejectedContractTransactionHistory(transactionType=transactionType,
+                                                            contractName=parsed_data['contractName'],
+                                                            contractAddress=contractAddress,
+                                                            sourceFloAddress=sourceFloAddress,
+                                                            destFloAddress=destFloAddress,
+                                                            transferAmount=None,
+                                                            blockNumber=transaction_data['blockheight'],
+                                                            blockHash=transaction_data['blockhash'],
+                                                            time=transaction_data['time'],
+                                                            transactionHash=transaction_data['txid'],
+                                                            blockchainReference=blockchainReference,
+                                                            jsonData=json.dumps(transaction_data),
+                                                            rejectComment=rejectComment,
+                                                            parsedFloData=json.dumps(parsed_data)))
+            session.commit()
+            session.close()    
+            break
+        except:
+            logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+def convert_datetime_to_arrowobject(expiryTime):
+    expirytime_split = expiryTime.split(' ')
+    parse_string = '{}/{}/{} {}'.format(expirytime_split[3], parsing.months[expirytime_split[1]], expirytime_split[2], expirytime_split[4])
+    expirytime_object = parsing.arrow.get(parse_string, 'YYYY/M/D HH:mm:ss').replace(tzinfo=expirytime_split[5][3:])
+    return expirytime_object
+
+def convert_datetime_to_arrowobject_regex(expiryTime):
+    datetime_re = re.compile(r'(\w{3}\s\w{3}\s\d{1,2}\s\d{4}\s\d{2}:\d{2}:\d{2})\s(gmt[+-]\d{4})')
+    match = datetime_re.search(expiryTime)
+    if match:
+        datetime_str = match.group(1)
+        timezone_offset = match.group(2)[3:]
+        dt = arrow.get(datetime_str, 'ddd MMM DD YYYY HH:mm:ss').replace(tzinfo=timezone_offset)
+        return dt
+    else:
+        return 0
+
+
+def is_a_contract_address(floAddress):
+    while True:
+        try:
+            # check contract address mapping db if the address is present, and return True or False based on that 
+            session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
+
+            # contract_number = session.query(func.sum(ContractAddressMapping.contractAddress)).filter(ContractAddressMapping.contractAddress == floAddress).all()[0][0]
+            query_data = session.query(ContractAddressMapping.contractAddress).filter(ContractAddressMapping.contractAddress == floAddress).all()
+            contract_number = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+            session.close()
+
+            if contract_number is None or contract_number==0: 
+                return False
+            else:
+                return True
+        except:
+            logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+""" ? NOT USED ?
+def fetchDynamicSwapPrice_old(contractStructure, transaction_data, blockinfo):
+    oracle_address = contractStructure['oracle_address']
+    # fetch transactions from the blockchain where from address : oracle-address... to address: contract address
+    # find the first contract transaction which adheres to price change format
+    # {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
+    response = requests.get(f'{neturl}api/v1/address/{oracle_address}', verify=API_VERIFY)
+    if response.status_code == 200:
+        response = response.json()
+        if 'transactions' not in response.keys(): # API doesn't return 'transactions' key, if 0 txs present on address
+            return float(contractStructure['price'])
+        else:
+            transactions = response['transactions']
+            for transaction_hash in transactions:
+                transaction_response = requests.get(f'{neturl}api/v1/tx/{transaction_hash}', verify=API_VERIFY)
+                if transaction_response.status_code == 200:
+                    transaction = transaction_response.json()
+                    floData = transaction['floData']
+                    # If the blocktime of the transaction is < than the current block time
+                    if transaction['time'] < blockinfo['time']:
+                        # Check if flodata is in the format we are looking for
+                        # ie. {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
+                        # and receiver address should be contractAddress
+                        try:
+                            assert transaction_data['receiverAddress'] == contractStructure['contractAddress']
+                            assert find_sender_receiver(transaction)[0] == oracle_address
+                            floData = json.loads(floData)
+                            # Check if the contract name and address are right
+                            assert floData['price-update']['contract-name'] == contractStructure['contractName']
+                            assert floData['price-update']['contract-address'] == contractStructure['contractAddress']
+                            return float(floData['price-update']['price'])
+                        except:
+                            continue
+                    else:
+                        continue
+                else:
+                    logger.info('API error while fetchDynamicSwapPrice')
+                    sys.exit(0)
+            return float(contractStructure['price'])
+    else:
+        logger.info('API error fetchDynamicSwapPrice')
+        sys.exit(0)
+"""
+
+def fetchDynamicSwapPrice(contractStructure, blockinfo):
+    oracle_address = contractStructure['oracle_address']
+    # fetch transactions from the blockchain where from address : oracle-address... to address: contract address
+    # find the first contract transaction which adheres to price change format
+    # {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
+    is_incomplete_key_present = False
+    latest_param = 'true'
+    mempool_param = 'false'
+    init_id = None
+    while True:
+        try:
+            response = requests.get(f'{api_url}api/v1/address/{oracle_address}?details=txs', verify=API_VERIFY)
+            if response.status_code == 200:
+                response = response.json()
+                if len(response['txs']) == 0: 
+                    return float(contractStructure['price'])
+                else:
+                    for transaction in response['txs']:
+                        if 'floData' in transaction.keys():
+                            floData = transaction['floData']
                         else:
-                            contractStructure[item[0]] = item[1]
+                            floData = ''
+                        # If the blocktime of the transaction is < than the current block time
+                        if transaction['time'] < blockinfo['time']:
+                            # Check if flodata is in the format we are looking for
+                            # ie. {"price-update":{"contract-name": "", "contract-address": "", "price": 3}}
+                            # and receiver address should be contractAddress
+                            try:
+                                sender_address, receiver_address = find_sender_receiver(transaction)
+                                assert sender_address == oracle_address
+                                assert receiver_address == contractStructure['contractAddress']
+                                floData = json.loads(floData)
+                                # Check if the contract name and address are right
+                                assert floData['price-update']['contract-name'] == contractStructure['contractName']
+                                assert floData['price-update']['contract-address'] == contractStructure['contractAddress']
+                                return float(floData['price-update']['price'])
+                            except:
+                                continue
+                        else:
+                            continue
+                break
+            else:
+                logger.info(f'API error fetchDynamicSwapPrice. Retry in {RETRY_TIMEOUT_LONG}s...')
+                #sys.exit(0)
+                time.sleep(RETRY_TIMEOUT_LONG)
+        except:
+            logger.info(f'API error fetchDynamicSwapPrice. Retry in {RETRY_TIMEOUT_LONG}s...')
+            time.sleep(RETRY_TIMEOUT_LONG)
 
-                    if conditionDict:
-                        contractStructure['exitconditions'] = conditionDict
+    return float(contractStructure['price'])
 
-                    # Update the response dictionary
-                    returnval.update(contractStructure)
-                    if 'exitconditions' in returnval:
-                        returnval['userChoice'] = returnval.pop('exitconditions')
 
+def processBlock(blockindex=None, blockhash=None, blockinfo=None, keywords=None):
+    """
+    Processes a block with optional keyword filtering.
+
+    :param blockindex: The block index (height) to process.
+    :param blockhash: The block hash to process.
+    :param blockinfo: The block data to process. If not provided, it will be fetched.
+    :param keywords: List of keywords to filter transactions. If None, processes all transactions.
+    """
+    global args
+    while True:  # Loop to handle rollbacks
+        # Retrieve block information if not already provided
+        if blockinfo is None:
+            if blockindex is not None and blockhash is None:
+                logger.info(f'Processing block {blockindex}')
+                while blockhash is None or blockhash == '':
+                    response = newMultiRequest(f"block-index/{blockindex}")
+                    try:
+                        blockhash = response['blockHash']
+                    except:
+                        logger.info(f"API call block-index/{blockindex} failed to give proper response. Retrying.")
+
+            blockinfo = newMultiRequest(f"block/{blockhash}")
+
+        # Filter based on keywords if provided
+        if keywords:
+            should_process = any(
+                any(keyword.lower() in transaction_data.get("floData", "").lower() for keyword in keywords)
+                for transaction_data in blockinfo.get('txs', [])
+            )
+            if not should_process:
+                logger.info(f"Block {blockindex} does not contain relevant keywords. Skipping processing.")
+                break
+
+        # Add block to the database (this shouldn't prevent further processing)
+        block_already_exists = False
+        try:
+            block_already_exists = add_block_hashrecord(blockinfo["height"], blockinfo["hash"])
         except Exception as e:
-            logger.error(f"Error fetching contract structure: {e}", exc_info=True)
-            return jsonify(result='error', description="Failed to fetch contract structure"), 500
+            logger.error(f"Error adding block {blockinfo['height']} to the database: {e}")
 
-        # Return the final response
-        logger.info("Returning final response with contract information")
-        return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, contractInfo=returnval), 200
+        # Ensure processing continues even if the block exists
+        if block_already_exists:
+            logger.info(f"Block {blockindex} already exists but will continue processing its transactions.")
 
-    except Exception as e:
-        logger.error(f"Unhandled error in getContractInfo: {e}", exc_info=True)
-        return jsonify(result='error', description="Internal Server Error"), 500
+        # Detect reorg every 10 blocks
+        if not args.rebuild and blockindex is not None and blockindex % 10 == 0:
+            fork_point = detect_reorg()
+            if fork_point is not None:
+                logger.warning(f"Blockchain reorganization detected! Fork point at block {fork_point}.")
+
+                # Handle rollback
+                rollback_to_block(fork_point)
+
+                # Restart processing from fork point
+                blockindex = fork_point + 1
+                blockhash = None
+                blockinfo = None
+
+                # Fetch new blockhash and blockinfo for the updated blockindex
+                while blockhash is None or blockhash == '':
+                    response = newMultiRequest(f"block-index/{blockindex}")
+                    try:
+                        blockhash = response['blockHash']
+                    except:
+                        logger.info(f"API call block-index/{blockindex} failed to give proper response. Retrying.")
+
+                # Fetch blockinfo for the new blockhash
+                blockinfo = newMultiRequest(f"block/{blockhash}")
+
+                logger.info(f"Rollback complete. Restarting processing from block {blockindex} with hash {blockhash}.")
+                continue  # Restart loop from updated fork point
+
+        # Perform expiry and deposit trigger checks
+        checkLocal_time_expiry_trigger_deposit(blockinfo)
+
+        # Process transactions in the block
+        acceptedTxList = []
+        logger.info("Before tx loop")
+
+        for transaction_data in blockinfo["txs"]:
+            transaction = transaction_data["txid"]
+
+            try:
+                text = transaction_data["floData"]
+            except:
+                text = ''
+            text = text.replace("\n", " \n ")
+            returnval = None
+            parsed_data = parsing.parse_flodata(text, blockinfo, config['DEFAULT']['NET'])
+            if parsed_data['type'] not in ['noise', None, '']:
+                logger.info(f"Processing transaction {transaction}")
+                logger.info(f"flodata {text} is parsed to {parsed_data}")
+                returnval = processTransaction(transaction_data, parsed_data, blockinfo)
+
+            if returnval == 1:
+                acceptedTxList.append(transaction)
+            elif returnval == 0:
+                logger.info(f"Transfer for the transaction {transaction} is illegitimate. Moving on")
+
+        logger.info("Completed tx loop")
+
+        if len(acceptedTxList) > 0:
+            tempinfo = blockinfo['txs'].copy()
+            for tx in blockinfo['txs']:
+                if tx['txid'] not in acceptedTxList:
+                    tempinfo.remove(tx)
+            blockinfo['txs'] = tempinfo
+
+            try:
+                updateLatestBlock(blockinfo)  # Core logic to update
+                logger.info(f"Successfully updated latest block: {blockinfo['height']}")
+            except Exception as e:
+                logger.error(f"Error updating latest block {blockinfo['height']} in updateLatestBlock: {e}")
+
+        try:
+            session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+            entry = session.query(SystemData).filter(SystemData.attribute == 'lastblockscanned').all()[0]
+            entry.value = str(blockinfo['height'])
+            session.commit()
+            session.close()
+        except Exception as e:
+            logger.error(f"Error connecting to 'system' database: {e}. Retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+        break  # Exit loop after processing is complete without a rollback
 
 
-
-@app.route('/api/v1.0/getSmartContractParticipants', methods=['GET'])
-async def getcontractparticipants():
+def updateLatestTransaction(transactionData, parsed_data, db_reference, transactionType=None ):
+    # connect to latest transaction db
+    while True:
+        try:
+            conn = create_database_connection('latest_cache', {'db_name':"latestCache"})
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    if transactionType is None:
+        transactionType = parsed_data['type']
     try:
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
+        conn.execute("INSERT INTO latestTransactions (transactionHash, blockNumber, jsonData, transactionType, parsedFloData, db_reference) VALUES (%s, %s, %s, %s, %s, %s)", (transactionData['txid'], transactionData['blockheight'], json.dumps(transactionData), transactionType, json.dumps(parsed_data), db_reference))
+    except Exception as e:
+        logger.error(f"Error inserting into latestTransactions: {e}")
+    finally:
+        conn.close()
 
-        if not contractName:
-            return jsonify(result='error', description="Smart Contract's name hasn't been passed"), 400
 
-        if not contractAddress:
-            return jsonify(result='error', description="Smart Contract's address hasn't been passed"), 400
 
-        contractName = contractName.strip().lower()
-        contractAddress = contractAddress.strip()
+def updateLatestBlock(blockData):
+    # connect to latest block db
+    while True:
+        try:
+            conn = create_database_connection('latest_cache', {'db_name':"latestCache"})
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    conn.execute('INSERT INTO latestBlocks(blockNumber, blockHash, jsonData) VALUES (%s, %s, %s)',(blockData['height'], blockData['hash'], json.dumps(blockData)))
+    #conn.commit()
+    conn.close()
 
-        # Standardize smart contract database name
-        contract_db_name = standardize_db_name(f"{contractName}_{contractAddress}")
 
-        # Fetch contract structure asynchronously
-        contractStructure = await fetchContractStructure(contractName, contractAddress)
+def process_pids(entries, session, piditem):
+    for entry in entries:
+        '''consumedpid_dict = literal_eval(entry.consumedpid)
+        total_consumedpid_amount = 0
+        for key in consumedpid_dict.keys():
+            total_consumedpid_amount = total_consumedpid_amount + float(consumedpid_dict[key])
+        consumedpid_dict[piditem[0]] = total_consumedpid_amount
+        entry.consumedpid = str(consumedpid_dict)'''
+        entry.orphaned_parentid = entry.parentid
+        entry.parentid = None
+    #session.commit()
+    return 1
 
-        # Initialize response
-        returnval = {}
 
-        # Get an async connection to the contract database
-        async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
+def transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None, transactionType=None):
+    
+    # provide default transactionType value
+    if transactionType is None:
+        try:
+            transactionType=parsed_data['type']
+        except:
+            logger.info("This is a critical error. Please report to developers")
 
-                # Handle external trigger contracts
-                if 'exitconditions' in contractStructure:
-                    await cursor.execute('SELECT * FROM contractTransactionHistory WHERE transactionType="trigger"')
-                    triggers = await cursor.fetchall()
+    while True:
+        try:
+            session = create_database_session_orm('token', {'token_name': f"{tokenIdentification}"}, TokenBase)
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
 
-                    if len(triggers) == 1:
-                        await cursor.execute('SELECT value FROM contractstructure WHERE attribute="tokenIdentification"')
-                        token = (await cursor.fetchone())[0]
+    tokenAmount = float(tokenAmount)
+    if isInfiniteToken == True:
+        # Make new entry 
+        receiverAddress_details = session.query(ActiveTable).filter(ActiveTable.address==outputAddress, ActiveTable.addressBalance!=None).first()
+        if receiverAddress_details is None:
+            addressBalance = tokenAmount
+        else:
+            addressBalance =  perform_decimal_operation('addition', receiverAddress_details.addressBalance, tokenAmount)
+            receiverAddress_details.addressBalance = None
+        session.add(ActiveTable(address=outputAddress, consumedpid='1', transferBalance=tokenAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
-                        await cursor.execute('SELECT id, participantAddress, tokenAmount, userChoice, transactionHash, winningAmount FROM contractparticipants')
-                        result = await cursor.fetchall()
-                        for row in result:
-                            returnval[row[1]] = {
-                                'participantFloAddress': row[1],
-                                'tokenAmount': row[2],
-                                'userChoice': row[3],
-                                'transactionHash': row[4],
-                                'winningAmount': row[5],
-                                'tokenIdentification': token
-                            }
-                    elif len(triggers) == 0:
-                        await cursor.execute('SELECT id, participantAddress, tokenAmount, userChoice, transactionHash FROM contractparticipants')
-                        result = await cursor.fetchall()
-                        for row in result:
-                            returnval[row[1]] = {
-                                'participantFloAddress': row[1],
-                                'tokenAmount': row[2],
-                                'userChoice': row[3],
-                                'transactionHash': row[4]
-                            }
+        add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=transactionType, parsedFloData=json.dumps(parsed_data))
+        session.commit()
+        session.close()
+        return 1
+
+    else:
+        # availableTokens = session.query(func.sum(ActiveTable.transferBalance)).filter_by(address=inputAddress).all()[0][0]
+
+        query_data = session.query(ActiveTable.transferBalance).filter_by(address=inputAddress).all()
+        availableTokens = float(sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data))
+        logger.info(f"The sender address {inputAddress} owns {availableTokens} {tokenIdentification.upper()} tokens")
+
+        commentTransferAmount = float(tokenAmount)
+        if availableTokens is None:
+            logger.info(f"The sender address {inputAddress} doesn't own any {tokenIdentification.upper()} tokens")
+            session.close()
+            return 0
+
+        elif availableTokens < commentTransferAmount:
+            logger.info("The transfer amount is more than the user balance\nThis transaction will be discarded\n")
+            session.close()
+            return 0
+
+        elif availableTokens >= commentTransferAmount:
+            logger.info(f"System has accepted transfer of {commentTransferAmount} {tokenIdentification.upper()}# from {inputAddress} to {outputAddress}")
+            table = session.query(ActiveTable).filter(ActiveTable.address == inputAddress).all()
+            pidlst = []
+            checksum = 0
+            for row in table:
+                if checksum >= commentTransferAmount:
+                    break
+                pidlst.append([row.id, row.transferBalance])
+                checksum = perform_decimal_operation('addition', checksum, row.transferBalance)
+
+            if checksum == commentTransferAmount:
+                consumedpid_string = ''
+                # Update all pids in pidlist's transferBalance to 0
+                lastid = session.query(ActiveTable)[-1].id
+                piddict = {}
+                for piditem in pidlst:
+                    entry = session.query(ActiveTable).filter(ActiveTable.id == piditem[0]).all()
+                    consumedpid_string = consumedpid_string + '{},'.format(piditem[0])
+                    piddict[piditem[0]] = piditem[1]
+                    session.add(TransferLogs(sourceFloAddress=inputAddress, destFloAddress=outputAddress,
+                                            transferAmount=entry[0].transferBalance, sourceId=piditem[0],
+                                            destinationId=lastid + 1,
+                                            blockNumber=blockinfo['height'], time=blockinfo['time'],
+                                            transactionHash=transaction_data['txid']))
+                    entry[0].transferBalance = 0
+
+                if len(consumedpid_string) > 1:
+                    consumedpid_string = consumedpid_string[:-1]
+
+                # Make new entry
+                receiverAddress_details = session.query(ActiveTable).filter(ActiveTable.address==outputAddress, ActiveTable.addressBalance!=None).first()
+                if receiverAddress_details is None:
+                    addressBalance = commentTransferAmount
+                else:
+                    addressBalance = perform_decimal_operation('addition', receiverAddress_details.addressBalance, commentTransferAmount)
+                    receiverAddress_details.addressBalance = None
+                session.add(ActiveTable(address=outputAddress, consumedpid=str(piddict), transferBalance=commentTransferAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
+
+                senderAddress_details = session.query(ActiveTable).filter_by(address=inputAddress).order_by(ActiveTable.id.desc()).first()
+                senderAddress_details.addressBalance = perform_decimal_operation('subtraction', senderAddress_details.addressBalance, commentTransferAmount )
+
+                # Migration
+                # shift pid of used utxos from active to consumed
+                for piditem in pidlst:
+                    # move the parentids consumed to consumedpid column in both activeTable and consumedTable
+                    entries = session.query(ActiveTable).filter(ActiveTable.parentid == piditem[0]).all()
+                    process_pids(entries, session, piditem)
+
+                    entries = session.query(ConsumedTable).filter(ConsumedTable.parentid == piditem[0]).all()
+                    process_pids(entries, session, piditem)
+
+                    # move the pids consumed in the transaction to consumedTable and delete them from activeTable
+                    session.execute('INSERT INTO consumedTable (id, address, parentid, consumedpid, transferBalance, addressBalance, orphaned_parentid, blockNumber) SELECT id, address, parentid, consumedpid, transferBalance, addressBalance, orphaned_parentid, blockNumber FROM activeTable WHERE id={}'.format(piditem[0]))
+                    session.execute('DELETE FROM activeTable WHERE id={}'.format(piditem[0]))
+                    session.commit()
+                session.commit()
+
+            elif checksum > commentTransferAmount:
+                consumedpid_string = ''
+                # Update all pids in pidlist's transferBalance
+                lastid = session.query(ActiveTable)[-1].id
+                piddict = {}
+                for idx, piditem in enumerate(pidlst):
+                    entry = session.query(ActiveTable).filter(ActiveTable.id == piditem[0]).all()
+                    if idx != len(pidlst) - 1:
+                        session.add(TransferLogs(sourceFloAddress=inputAddress, destFloAddress=outputAddress,
+                                                transferAmount=entry[0].transferBalance, sourceId=piditem[0],
+                                                destinationId=lastid + 1,
+                                                blockNumber=blockinfo['height'], time=blockinfo['time'],
+                                                transactionHash=transaction_data['txid']))
+                        entry[0].transferBalance = 0
+                        piddict[piditem[0]] = piditem[1]
+                        consumedpid_string = consumedpid_string + '{},'.format(piditem[0])
                     else:
-                        return jsonify(result='error', description='More than 1 trigger present. This is unusual, please check your code'), 500
+                        session.add(TransferLogs(sourceFloAddress=inputAddress, destFloAddress=outputAddress,
+                                                transferAmount=perform_decimal_operation('subtraction', piditem[1], perform_decimal_operation('subtraction', checksum, commentTransferAmount)),
+                                                sourceId=piditem[0],
+                                                destinationId=lastid + 1,
+                                                blockNumber=blockinfo['height'], time=blockinfo['time'],
+                                                transactionHash=transaction_data['txid']))
+                        entry[0].transferBalance = perform_decimal_operation('subtraction', checksum, commentTransferAmount)
 
-                # Handle internal trigger contracts
-                elif 'payeeAddress' in contractStructure:
-                    await cursor.execute('SELECT id, participantAddress, tokenAmount, userChoice, transactionHash FROM contractparticipants')
-                    result = await cursor.fetchall()
-                    for row in result:
-                        returnval[row[1]] = {
-                            'participantFloAddress': row[1],
-                            'tokenAmount': row[2],
-                            'userChoice': row[3],
-                            'transactionHash': row[4]
-                        }
+                if len(consumedpid_string) > 1:
+                    consumedpid_string = consumedpid_string[:-1]
 
-                # Handle continuous-event contracts with token swaps
-                elif contractStructure['contractType'] == 'continuos-event' and contractStructure['subtype'] == 'tokenswap':
-                    await cursor.execute('SELECT * FROM contractparticipants')
-                    contract_participants = await cursor.fetchall()
-                    for row in contract_participants:
-                        returnval[row[1]] = {
-                            'participantFloAddress': row[1],
-                            'participationAmount': row[2],
-                            'swapPrice': float(row[3]),
-                            'transactionHash': row[4],
-                            'blockNumber': row[5],
-                            'blockHash': row[6],
-                            'swapAmount': row[7]
-                        }
+                # Make new entry
+                receiverAddress_details = session.query(ActiveTable).filter(ActiveTable.address==outputAddress, ActiveTable.addressBalance!=None).first()
+                if receiverAddress_details is None:
+                    addressBalance = commentTransferAmount
+                else:
+                    addressBalance =  perform_decimal_operation('addition', receiverAddress_details.addressBalance, commentTransferAmount)
+                    receiverAddress_details.addressBalance = None
+                session.add(ActiveTable(address=outputAddress, parentid=pidlst[-1][0], consumedpid=str(piddict), transferBalance=commentTransferAmount, addressBalance=addressBalance, blockNumber=blockinfo['height']))
 
-        # Final response
-        if not is_backend_ready():
-            return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, contractName=contractName, contractAddress=contractAddress, participantInfo=returnval), 206
+                senderAddress_details = session.query(ActiveTable).filter_by(address=inputAddress).order_by(ActiveTable.id.desc()).first()
+                senderAddress_details.addressBalance = perform_decimal_operation('subtraction', senderAddress_details.addressBalance, commentTransferAmount)
+
+                # Migration 
+                # shift pid of used utxos from active to consumed
+                for piditem in pidlst[:-1]:
+                    # move the parentids consumed to consumedpid column in both activeTable and consumedTable
+                    entries = session.query(ActiveTable).filter(ActiveTable.parentid == piditem[0]).all()
+                    process_pids(entries, session, piditem)
+
+                    entries = session.query(ConsumedTable).filter(ConsumedTable.parentid == piditem[0]).all()
+                    process_pids(entries, session, piditem)
+
+                    # move the pids consumed in the transaction to consumedTable and delete them from activeTable
+                    session.execute('INSERT INTO consumedTable (id, address, parentid, consumedpid, transferBalance, addressBalance, orphaned_parentid, blockNumber) SELECT id, address, parentid, consumedpid, transferBalance, addressBalance, orphaned_parentid, blockNumber FROM activeTable WHERE id={}'.format(piditem[0]))
+                    session.execute('DELETE FROM activeTable WHERE id={}'.format(piditem[0]))
+                session.commit()
+            
+            add_transaction_history(token_name=tokenIdentification, sourceFloAddress=inputAddress, destFloAddress=outputAddress, transferAmount=tokenAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=transactionType, parsedFloData=json.dumps(parsed_data))
+            
+            session.commit()
+            session.close()
+            return 1
+
+
+def trigger_internal_contract_onvalue(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name, contract_address, transaction_subType):
+    # Trigger the contract
+    if tokenAmount_sum <= 0:
+        # Add transaction to ContractTransactionHistory
+        add_contract_transaction_history(contract_name=contract_name, contract_address=contract_address, transactionType='trigger', transactionSubType='zero-participation', sourceFloAddress='', destFloAddress='', transferAmount=0, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+        # Add transaction to latestCache
+        updateLatestTransaction(transaction_data, parsed_data , f"{contract_name}-{contract_address}")
+
+    else:
+        payeeAddress = json.loads(contractStructure['payeeAddress'])
+        tokenIdentification = contractStructure['tokenIdentification']
+
+        for floaddress in payeeAddress.keys():
+            transferAmount = perform_decimal_operation('multiplication', tokenAmount_sum, perform_decimal_operation('division', payeeAddress[floaddress], 100))
+            returnval = transferToken(tokenIdentification, transferAmount, contract_address, floaddress, transaction_data=transaction_data, blockinfo = blockinfo, parsed_data = parsed_data)
+            if returnval == 0:
+                logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
+                return 0
+
+            # Add transaction to ContractTransactionHistory
+            add_contract_transaction_history(contract_name=contract_name, contract_address=contract_address, transactionType='trigger', transactionSubType=transaction_subType, sourceFloAddress=contract_address, destFloAddress=floaddress, transferAmount=transferAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+            # Add transaction to latestCache
+            updateLatestTransaction(transaction_data, parsed_data , f"{contract_name}-{contract_address}")
+    return 1
+
+
+def process_minimum_subscriptionamount(contractStructure, connection, blockinfo, transaction_data, parsed_data):
+    minimumsubscriptionamount = float(contractStructure['minimumsubscriptionamount'])
+
+    rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+    tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+
+    if tokenAmount_sum < minimumsubscriptionamount:
+        # Initialize payback to contract participants
+        contractParticipants = connection.execute('SELECT participantAddress, tokenAmount, transactionHash FROM contractparticipants').fetchall()
+
+        for participant in contractParticipants:
+            tokenIdentification = contractStructure['tokenIdentification']
+            contractAddress = connection.execute('SELECT value FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
+            #transferToken(tokenIdentification, tokenAmount, inputAddress, outputAddress, transaction_data=None, parsed_data=None, isInfiniteToken=None, blockinfo=None, transactionType=None)
+            returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], blockinfo = blockinfo, transaction_data=transaction_data,  parsed_data=parsed_data)
+            if returnval == 0:
+                logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger. THIS IS CRITICAL ERROR")
+                return
+            
+            connection.execute('UPDATE contractparticipants SET winningAmount="{}" WHERE participantAddress="{}" AND transactionHash="{}"'.format(participant[1], participant[0], participant[2]))
+
+            # add transaction to ContractTransactionHistory
+            add_contract_transaction_history(contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transactionType=parsed_data['type'], transactionSubType='minimumsubscriptionamount-payback', sourceFloAddress=contractAddress, destFloAddress=participant[0], transferAmount=participant[1], blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+        return 1
+    else:
+        return 0
+
+
+def process_maximum_subscriptionamount(contractStructure, connection, status, blockinfo, transaction_data, parsed_data):
+    maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+    rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+    tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+    if tokenAmount_sum >= maximumsubscriptionamount:
+        # Trigger the contract
+        if status == 'close':
+            success_returnval = trigger_internal_contract_onvalue(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=contractStructure['contractName'], contract_address=contractStructure['contractAddress'], transaction_subType='maximumsubscriptionamount')
+            if not success_returnval:
+                return 0
+        return 1
+    else:
+        return 0
+
+
+def check_contract_status(contractName, contractAddress):
+    # Status of the contract is at 2 tables in system.db
+    # activecontracts and time_actions
+    # select the last entry from the column 
+    while True:
+        try:
+            connection = create_database_connection('system_dbs')
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    contract_status = connection.execute(f'SELECT status FROM time_actions WHERE id=(SELECT MAX(id) FROM time_actions WHERE contractName="{contractName}" AND contractAddress="{contractAddress}")').fetchall()
+    return contract_status[0][0]
+
+
+def close_expire_contract(contractStructure, contractStatus, transactionHash, blockNumber, blockHash, incorporationDate, expiryDate, closeDate, trigger_time, trigger_activity, contractName, contractAddress, contractType, tokens_db, parsed_data, blockHeight):
+    while True:
+        try:
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    connection.execute("INSERT INTO activecontracts VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (None, contractStructure['contractName'], contractStructure['contractAddress'], contractStatus, contractStructure['tokenIdentification'], contractStructure['contractType'], transactionHash, blockNumber, blockHash, incorporationDate, expiryDate, closeDate))
+    connection.execute("INSERT INTO time_actions VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s, %s)", (None, trigger_time, trigger_activity, contractStatus, contractName, contractAddress, contractType, tokens_db, parsed_data, transactionHash, blockHeight))
+    connection.close()
+
+
+def return_time_active_contracts(session, status='active', activity='contract-time-trigger'):
+    sql_query = text("""
+        SELECT t1.* 
+        FROM time_actions t1 
+        JOIN (
+            SELECT contractName, contractAddress, MAX(id) AS max_id 
+            FROM time_actions 
+            GROUP BY contractName, contractAddress
+        ) t2 
+        ON t1.contractName = t2.contractName 
+        AND t1.contractAddress = t2.contractAddress 
+        AND t1.id = t2.max_id 
+        WHERE t1.status = :status AND t1.activity = :activity
+    """)
+    active_contracts = session.execute(sql_query, {'status': status, 'activity': activity}).fetchall()
+    return active_contracts
+
+
+
+def return_time_active_deposits(session):
+    # find all the deposits which are active
+    # todo - sqlalchemy gives me warning with the following method
+    subquery_filter = session.query(TimeActions.id).group_by(TimeActions.transactionHash,TimeActions.id).having(func.count(TimeActions.transactionHash)==1).subquery()
+    active_deposits = session.query(TimeActions).filter(TimeActions.id.in_(subquery_filter.select()), TimeActions.status=='active', TimeActions.activity=='contract-deposit').all()
+    return active_deposits
+
+
+def process_contract_time_trigger(blockinfo, systemdb_session, active_contracts):   
+    for query in active_contracts:
+        query_time = convert_datetime_to_arrowobject(query.time)
+        blocktime = parsing.arrow.get(blockinfo['time']).to('Asia/Kolkata')
+
+        if query.activity == 'contract-time-trigger':
+            contractStructure = extract_contractStructure(query.contractName, query.contractAddress)
+            connection = create_database_connection('smart_contract', {'contract_name':f"{query.contractName}", 'contract_address':f"{query.contractAddress}"})
+            if contractStructure['contractType'] == 'one-time-event':
+                # TODO - FIGURE A BETTER SOLUTION FOR THIS 
+                tx_type = 'trigger'
+                data = [blockinfo['hash'], blockinfo['height'], blockinfo['time'], blockinfo['size'], tx_type]
+
+                def _get_txid(data):
+                    """
+                    Generate a SHA256 hash of the input data.
+                    :param data: The data to be hashed.
+                    :return: The SHA256 hash as a hexadecimal string.
+                    """
+                    try:
+                        # Ensure data is encoded before hashing
+                        if isinstance(data, str):
+                            data = data.encode('utf-8')
+                        txid = hashlib.sha256(data).hexdigest()
+                        return txid
+                    except Exception as e:
+                        logger.error(f"Failed to generate SHA256 hash: {e}")
+                        raise e
+
+                
+                transaction_data = {}
+                transaction_data['txid'] = _get_txid(data)
+                transaction_data['blockheight'] = blockinfo['height']
+                transaction_data['time'] = blockinfo['time']
+
+                parsed_data = {}
+                parsed_data['type'] = tx_type
+                parsed_data['contractName'] = query.contractName
+                parsed_data['contractAddress'] = query.contractAddress
+
+                activecontracts_table_info = systemdb_session.query(ActiveContracts.blockHash, ActiveContracts.incorporationDate).filter(ActiveContracts.contractName==query.contractName, ActiveContracts.contractAddress==query.contractAddress, ActiveContracts.status=='active').first()
+
+                if 'exitconditions' in contractStructure: # Committee trigger contract type
+                    # maximumsubscription check, if reached then expire the contract 
+                    if 'maximumsubscriptionamount' in contractStructure:
+                        maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+                        if tokenAmount_sum >= maximumsubscriptionamount:
+                            # Expire the contract
+                            logger.info(f"Maximum Subscription amount {maximumsubscriptionamount} reached for {query.contractName}-{query.contractAddress}. Expiring the contract")
+                            close_expire_contract(contractStructure, 'expired', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], None, query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                                   
+                    if blocktime > query_time:
+                        if 'minimumsubscriptionamount' in contractStructure:
+                            if process_minimum_subscriptionamount(contractStructure, connection, blockinfo, transaction_data, parsed_data):
+                                logger.info(f"Contract trigger time {query_time} achieved and Minimimum subscription amount reached for {query.contractName}-{query.contractAddress}. Closing the contract")
+                                close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], blockinfo['time'], query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                                return 
+
+                        # Expire the contract
+                        logger.info(f"Contract trigger time {query_time} achieved for {query.contractName}-{query.contractAddress}. Expiring the contract")
+                        close_expire_contract(contractStructure, 'expired', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], None, query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                
+                elif 'payeeAddress' in contractStructure: # Internal trigger contract type
+                    
+                    # maximumsubscription check, if reached then trigger the contract
+                    if 'maximumsubscriptionamount' in contractStructure:
+                        maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+                        if tokenAmount_sum >= maximumsubscriptionamount:
+                            # Trigger the contract
+                            logger.info(f"Triggering the {query.contractName}-{query.contractAddress} as maximum subscription amount {maximumsubscriptionamount} has been reached ")
+                            success_returnval = trigger_internal_contract_onvalue(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='maximumsubscriptionamount')
+                            if not success_returnval:
+                                return 0
+                            logger.info(f"Closing the {query.contractName}-{query.contractAddress} as maximum subscription amount {maximumsubscriptionamount} has been reached ")
+                            close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], blockinfo['time'], query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                            return
+      
+                    if blocktime > query_time: 
+                        if 'minimumsubscriptionamount' in contractStructure:
+                            if process_minimum_subscriptionamount(contractStructure, connection, blockinfo, transaction_data, parsed_data):
+                                logger.info(f"Contract trigger time {query_time} achieved and Minimimum subscription amount reached for {query.contractName}-{query.contractAddress}. Closing the contract")
+                                close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], blockinfo['time'], query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                                return
+                        
+                        # Trigger the contract
+                        rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                        # Sum up using Decimal
+                        tokenAmount_sum = float(sum(Decimal(f"{row[0]}") for row in rows))
+                        logger.info(f"Triggering the contract {query.contractName}-{query.contractAddress}")
+                        success_returnval = trigger_internal_contract_onvalue(tokenAmount_sum, contractStructure, transaction_data, blockinfo, parsed_data, connection, contract_name=query.contractName, contract_address=query.contractAddress, transaction_subType='expiryTime')
+                        if not success_returnval:
+                            return 0
+
+                        logger.info(f"Closing the contract {query.contractName}-{query.contractAddress}")
+                        close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, blockinfo['time'], blockinfo['time'], query.time, query.activity, query.contractName, query.contractAddress, query.contractType, query.tokens_db, query.parsed_data, blockinfo['height'])
+                        return
+
+
+def process_contract_deposit_trigger(blockinfo, systemdb_session, active_deposits):
+    for query in active_deposits:
+        query_time = convert_datetime_to_arrowobject(query.time)
+        blocktime = parsing.arrow.get(blockinfo['time']).to('Asia/Kolkata')
+        if query.activity == 'contract-deposit':
+            if blocktime > query_time:
+                # find the status of the deposit 
+                # the deposit is unique
+                # find the total sum to be returned from the smart contract's participation table 
+                contract_db = create_database_session_orm('smart_contract', {'contract_name': query.contractName, 'contract_address': query.contractAddress}, ContractBase)
+
+                deposit_query = contract_db.query(ContractDeposits).filter(ContractDeposits.transactionHash == query.transactionHash).first()
+                deposit_last_latest_entry = contract_db.query(ContractDeposits).filter(ContractDeposits.transactionHash == query.transactionHash).order_by(ContractDeposits.id.desc()).first()
+                returnAmount = deposit_last_latest_entry.depositBalance
+                depositorAddress = deposit_last_latest_entry.depositorAddress
+
+                # Do a token transfer back to the deposit address 
+                sellingToken = contract_db.query(ContractStructure.value).filter(ContractStructure.attribute == 'selling_token').first()[0]
+                tx_block_string = f"{query.transactionHash}{blockinfo['height']}".encode('utf-8').hex()
+                parsed_data = {}
+                parsed_data['type'] = 'smartContractDepositReturn'
+                parsed_data['contractName'] = query.contractName
+                parsed_data['contractAddress'] = query.contractAddress
+                transaction_data = {}
+                transaction_data['txid'] = query.transactionHash
+                transaction_data['blockheight'] = blockinfo['height']
+                transaction_data['time'] = blockinfo['time']
+                logger.info(f"Initiating smartContractDepositReturn after time expiry {query_time} for {depositorAddress} with amount {returnAmount} {sellingToken}# from {query.contractName}-{query.contractAddress} contract ")
+                returnval = transferToken(sellingToken, returnAmount, query.contractAddress, depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, blockinfo=blockinfo)
+                if returnval == 0:
+                    logger.critical("Something went wrong in the token transfer method while return contract deposit. THIS IS CRITICAL ERROR")
+                    return
+                else:
+                    contract_db.add(ContractDeposits(
+                        depositorAddress = deposit_last_latest_entry.depositorAddress,
+                        depositAmount = -abs(returnAmount),
+                        depositBalance = 0,
+                        expiryTime = deposit_last_latest_entry.expiryTime,
+                        unix_expiryTime = deposit_last_latest_entry.unix_expiryTime,
+                        status = 'deposit-return',
+                        transactionHash = deposit_last_latest_entry.transactionHash,
+                        blockNumber = blockinfo['height'],
+                        blockHash = blockinfo['hash']
+                    ))
+                    logger.info(f"Successfully processed smartContractDepositReturn transaction ID {query.transactionHash} after time expiry {query_time} for {depositorAddress} with amount {returnAmount} {sellingToken}# from {query.contractName}-{query.contractAddress} contract ")
+                    add_contract_transaction_history(contract_name=query.contractName, contract_address=query.contractAddress, transactionType='smartContractDepositReturn', transactionSubType=None, sourceFloAddress=query.contractAddress, destFloAddress=depositorAddress, transferAmount=returnAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=deposit_last_latest_entry.transactionHash, jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+
+                    systemdb_session.add(TimeActions(
+                        time = query.time,
+                        activity = query.activity,
+                        status = 'returned',
+                        contractName = query.contractName,
+                        contractAddress = query.contractAddress,
+                        contractType = query.contractType,
+                        tokens_db = query.tokens_db,
+                        parsed_data = query.parsed_data,
+                        transactionHash = query.transactionHash,
+                        blockNumber = blockinfo['height']
+                    ))
+
+                    contract_db.commit()
+                    systemdb_session.commit()
+                    updateLatestTransaction(transaction_data, parsed_data, f"{query.contractName}-{query.contractAddress}")
+
+
+def checkLocal_time_expiry_trigger_deposit(blockinfo):
+    # Connect to system.db with a session 
+    while True:
+        try:
+            systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
+
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    timeactions_tx_hashes = []
+    active_contracts = return_time_active_contracts(systemdb_session)
+    active_deposits = return_time_active_deposits(systemdb_session)
+ 
+    process_contract_time_trigger(blockinfo, systemdb_session, active_contracts)
+    process_contract_deposit_trigger(blockinfo, systemdb_session, active_deposits)
+
+def check_reorg():
+    connection = create_database_connection('system_dbs')
+    blockbook_api_url = 'https://blockbook.ranchimall.net/'
+    BACK_TRACK_BLOCKS = 1000
+
+    # find latest block number in local database
+    latest_block = list(connection.execute("SELECT max(blockNumber) from latestBlocks").fetchone())[0]
+    block_number = latest_block
+
+    while block_number > 0:
+        # get the block hash
+        block_hash = list(connection.execute(f"SELECT blockHash from latestBlocks WHERE blockNumber = {block_number}").fetchone())[0] 
+
+        # Check if the block is in blockbook (i.e, not dropped in reorg)
+        response = requests.get(f'{blockbook_api_url}api/block/{block_number}', verify=API_VERIFY)
+        if response.status_code == 200:
+            response = response.json()
+            if response['hash'] == block_hash: # local blockhash matches with blockbook hash
+                break
+            else: # check for older blocks to trace where reorg has happened
+                block_number -= BACK_TRACK_BLOCKS
+                continue
         else:
-            return jsonify(result='ok', contractName=contractName, contractAddress=contractAddress, participantInfo=returnval), 200
+            logger.info('Response from the Blockbook API failed')
+            sys.exit(0) #TODO test reorg fix and remove this
 
-    except Exception as e:
-        print("getcontractparticipants:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
+    connection.close()
 
-
-
+    # rollback if needed
+    if block_number != latest_block:
+        rollback_to_block(block_number)
     
+    return block_number
+    
+def extract_contractStructure(contractName, contractAddress):
+    while True:
+        try:
+            connection = create_database_connection('smart_contract', {'contract_name':f"{contractName}", 'contract_address':f"{contractAddress}"})
+            break
+        except:
+            time.sleep(DB_RETRY_TIMEOUT)
+    attributevaluepair = connection.execute("SELECT attribute, value FROM contractstructure WHERE attribute != 'flodata'").fetchall()
+    contractStructure = {}
+    conditionDict = {}
+    counter = 0
+    for item in attributevaluepair:
+        if list(item)[0] == 'exitconditions':
+            conditionDict[counter] = list(item)[1]
+            counter = counter + 1
+        else:
+            contractStructure[list(item)[0]] = list(item)[1]
+    if len(conditionDict) > 0:
+        contractStructure['exitconditions'] = conditionDict
+    del counter, conditionDict
 
-@app.route('/api/v1.0/getParticipantDetails', methods=['GET'], endpoint='getParticipantDetailsV1')
-async def getParticipantDetails():
-    try:
-        floAddress = request.args.get('floAddress')
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
+    return contractStructure
 
-        if not floAddress:
-            return jsonify(result='error', description="FLO address hasn't been passed"), 400
 
-        if (contractName and not contractAddress) or (not contractName and contractAddress):
-            return jsonify(result='error', description='Pass both contractName and contractAddress as URL parameters'), 400
+def process_flo_checks(transaction_data):
+    # Create vinlist and outputlist
+    vinlist = []
+    querylist = []
 
-        floAddress = floAddress.strip()
-        if contractName:
-            contractName = contractName.strip().lower()
-        if contractAddress:
-            contractAddress = contractAddress.strip()
+    # Extract VIN information
+    for vin in transaction_data["vin"]:
+        vinlist.append([vin["addresses"][0], float(vin["value"])])
 
-        # Standardize the contract database name
-        system_db_name = standardize_db_name("system")
-        contract_db_name = standardize_db_name(f"{contractName}_{contractAddress}") if contractName and contractAddress else None
+    totalinputval = float(transaction_data["valueIn"])
 
-        # Connect to the system database asynchronously
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                # Query contract participation details for the FLO address
-                query = """
-                    SELECT * 
-                    FROM contractAddressMapping 
-                    WHERE address = %s AND addressType = 'participant'
-                """
-                params = [floAddress]
+    # Check if all the addresses in a transaction on the input side are the same
+    for idx, item in enumerate(vinlist):
+        if idx == 0:
+            temp = item[0]
+            continue
+        if item[0] != temp:
+            logger.info(f"System has found more than one address as part of vin. Transaction {transaction_data['txid']} is rejected")
+            return None, None, None
 
-                if contractName and contractAddress:
-                    query += " AND contractName = %s AND contractAddress = %s"
-                    params.extend([contractName, contractAddress])
+    inputlist = [vinlist[0][0], totalinputval]
+    inputadd = vinlist[0][0]
 
-                await cursor_system.execute(query, tuple(params))
-                participant_address_contracts = await cursor_system.fetchall()
+    # Check if the number of vout is more than 2 (Rule 42)
+    if len(transaction_data["vout"]) > 2:
+        logger.info(f"System has found more than 2 addresses as part of vout. Transaction {transaction_data['txid']} is rejected")
+        return None, None, None
 
-                if not participant_address_contracts:
-                    if not is_backend_ready():
-                        return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
+    # Extract output addresses (Rule 43)
+    outputlist = []
+    addresscounter = 0
+    inputcounter = 0
+    for obj in transaction_data["vout"]:
+        if 'addresses' not in obj["scriptPubKey"]:
+            continue
+        if obj["scriptPubKey"]["addresses"]:
+            addresscounter += 1
+            if inputlist[0] == obj["scriptPubKey"]["addresses"][0]:
+                inputcounter += 1
+                continue
+            outputlist.append([obj["scriptPubKey"]["addresses"][0], obj["value"]])
+
+    if addresscounter == inputcounter:
+        outputlist = [inputlist[0]]
+    elif len(outputlist) != 1:
+        logger.info(f"Transaction's change is not coming back to the input address. Transaction {transaction_data['txid']} is rejected")
+        return None, None, None
+    else:
+        outputlist = outputlist[0]
+
+    return inputlist, outputlist, inputadd
+
+
+def process_token_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+    if not is_a_contract_address(inputlist[0]) and not is_a_contract_address(outputlist[0]):
+        # check if the token exists in the database
+        if check_database_existence('token', {'token_name':f"{parsed_data['tokenIdentification']}"}):
+            # Pull details of the token type from system.db database 
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            db_details = connection.execute("SELECT db_name, db_type, keyword, object_format FROM databaseTypeMapping WHERE db_name='{}'".format(parsed_data['tokenIdentification']))
+            db_details = list(zip(*db_details))
+            if db_details[1][0] == 'infinite-token':
+                db_object = json.loads(db_details[3][0])
+                if db_object['root_address'] == inputlist[0]:
+                    isInfiniteToken = True
+                else:
+                    isInfiniteToken = False
+            else:
+                isInfiniteToken = False
+
+            # Check if the transaction hash already exists in the token db
+            connection = create_database_connection('token', {'token_name':f"{parsed_data['tokenIdentification']}"})
+            blockno_txhash = connection.execute('SELECT blockNumber, transactionHash FROM transactionHistory').fetchall()
+            connection.close()
+            blockno_txhash_T = list(zip(*blockno_txhash))
+
+            if transaction_data['txid'] in list(blockno_txhash_T[1]):
+                logger.warning(f"Transaction {transaction_data['txid']} already exists in the token db. This is unusual, please check your code")
+                pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} already exists in the token db. This is unusual, please check your code")
+                return 0
+
+            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0],outputlist[0], transaction_data, parsed_data, isInfiniteToken=isInfiniteToken, blockinfo = blockinfo)
+            if returnval == 0:
+                logger.info("Something went wrong in the token transfer method")
+                pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
+                return 0
+            else:
+                updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transactionType='token-transfer')
+
+            # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            firstInteractionCheck = connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+
+            if len(firstInteractionCheck) == 0:
+                connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+
+            connection.close()
+
+            # Pass information to SSE channel
+            headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+            # r = requests.post(tokenapi_sse_url, json={f"message': 'Token Transfer | name:{parsed_data['tokenIdentification']} | transactionHash:{transaction_data['txid']}"}, headers=headers)
+            return 1
+        else:
+            rejectComment = f"Token transfer at transaction {transaction_data['txid']} rejected as a token with the name {parsed_data['tokenIdentification']} doesnt not exist"
+            logger.info(rejectComment)                    
+            rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+    
+    else:
+        rejectComment = f"Token transfer at transaction {transaction_data['txid']} rejected as either the input address or the output address is part of a contract address"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+
+def process_one_time_event_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd,connection,session,contractStructure):
+    logger.info(f"Processing one-time event transfer for transaction {transaction_data['txid']}")
+
+    # Check if the transaction hash already exists in the contract db (Safety check)
+    participantAdd_txhash = connection.execute('SELECT participantAddress, transactionHash FROM contractparticipants').fetchall()
+    participantAdd_txhash_T = list(zip(*participantAdd_txhash))
+
+    if len(participantAdd_txhash) != 0 and transaction_data['txid'] in list(participantAdd_txhash_T[1]):
+        logger.warning(f"Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+        pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+        return 0
+
+    # If contractAddress was passed, then check if it matches the output address of this contract
+    if 'contractAddress' in parsed_data:
+        if parsed_data['contractAddress'] != outputlist[0]:
+            rejectComment = f"Contract participation at transaction {transaction_data['txid']} rejected as contractAddress specified in flodata, {parsed_data['contractAddress']}, does not match with transaction's output address {outputlist[0]}"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(f"Error| Mismatch in contract address specified in flodata and the output address of the transaction {transaction_data['txid']}")
+            return 0
+
+    # Check the status of the contract
+    contractStatus = check_contract_status(parsed_data['contractName'], outputlist[0])
+
+    if contractStatus == 'closed':
+        rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart contract {parsed_data['contractName']} at the {outputlist[0]} is closed"
+        logger.info(rejectComment)
+        rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+        return 0
+    else:
+        session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+        result = session.query(ContractStructure).filter_by(attribute='expiryTime').all()
+        session.close()
+        if result:
+            # Now parse the expiry time in Python
+            expirytime = result[0].value.strip()
+            expirytime_split = expirytime.split(' ')
+            parse_string = '{}/{}/{} {}'.format(expirytime_split[3], parsing.months[expirytime_split[1]], expirytime_split[2], expirytime_split[4])
+            expirytime_object = parsing.arrow.get(parse_string, 'YYYY/M/D HH:mm:ss').replace(tzinfo=expirytime_split[5][3:])
+            blocktime_object = parsing.arrow.get(transaction_data['time']).to('Asia/Kolkata')
+
+            if blocktime_object > expirytime_object:
+                rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart contract {parsed_data['contractName']}-{outputlist[0]} has expired and will not accept any user participation"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                pushData_SSEapi(rejectComment)
+                return 0
+
+    # Check if user choice has been passed to the wrong contract type
+    if 'userChoice' in parsed_data and 'exitconditions' not in contractStructure:
+        rejectComment = f"Transaction {transaction_data['txid']} rejected as userChoice, {parsed_data['userChoice']}, has been passed to Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]} which doesn't accept any userChoice"
+        logger.info(rejectComment)
+        rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+    # Check if the right token is being sent for participation
+    if parsed_data['tokenIdentification'] != contractStructure['tokenIdentification']:
+        rejectComment = f"Transaction {transaction_data['txid']} rejected as the token being transferred, {parsed_data['tokenIdentification'].upper()}, is not part of the structure of Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+        logger.info(rejectComment)
+        rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+    # Check if contractAmount is part of the contract structure, and enforce it if it is
+    if 'contractAmount' in contractStructure:
+        if float(contractStructure['contractAmount']) != float(parsed_data['tokenAmount']):
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as contractAmount being transferred is not part of the structure of Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+
+    partialTransferCounter = 0
+    # Check if maximum subscription amount has been reached
+    if 'maximumsubscriptionamount' in contractStructure:
+        # Now parse the expiry time in Python
+        maximumsubscriptionamount = float(contractStructure['maximumsubscriptionamount'])
+        session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+        
+        query_data = session.query(ContractParticipants.tokenAmount).all()
+        amountDeposited = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+
+        session.close()
+
+        if amountDeposited is None:
+            amountDeposited = 0
+
+        if amountDeposited >= maximumsubscriptionamount:
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as maximum subscription amount has been reached for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+        elif (perform_decimal_operation('addition', float(amountDeposited), float(parsed_data['tokenAmount'])) > maximumsubscriptionamount):
+            if 'contractAmount' in contractStructure:
+                rejectComment = f"Transaction {transaction_data['txid']} rejected as the contractAmount surpasses the maximum subscription amount, {contractStructure['maximumsubscriptionamount']} {contractStructure['tokenIdentification'].upper()}, for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                pushData_SSEapi(rejectComment)
+                return 0
+            else:
+                partialTransferCounter = 1
+                rejectComment = f"Transaction {transaction_data['txid']} rejected as the partial transfer of token {contractStructure['tokenIdentification'].upper()} is not allowed, for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                pushData_SSEapi(rejectComment)
+                return 0
+
+    # Check if exitcondition exists as part of contract structure and is given in right format
+    if 'exitconditions' in contractStructure:
+        # This means the contract has an external trigger, ie. trigger coming from the contract committee
+        exitconditionsList = []
+        for condition in contractStructure['exitconditions']:
+            exitconditionsList.append(contractStructure['exitconditions'][condition])
+
+        if parsed_data['userChoice'] in exitconditionsList:
+            if partialTransferCounter == 0:
+                # Check if the tokenAmount being transferred exists in the address & do the token transfer
+                returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo=blockinfo)
+                if returnval != 0:
+                    # Store participant details in the smart contract's db
+                    session.add(ContractParticipants(participantAddress=inputadd,
+                                                      tokenAmount=parsed_data['tokenAmount'],
+                                                      userChoice=parsed_data['userChoice'],
+                                                      transactionHash=transaction_data['txid'],
+                                                      blockNumber=transaction_data['blockheight'],
+                                                      blockHash=transaction_data['blockhash']))
+                    session.commit()
+
+                    # Store transfer as part of ContractTransactionHistory
+                    add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=parsed_data['tokenAmount'], blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+
+                    # Store a mapping of participant address -> Contract participated in
+                    system_session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+                    system_session.add(ContractAddressMapping(address=inputadd, addressType='participant',
+                                                        tokenAmount=parsed_data['tokenAmount'],
+                                                        contractName=parsed_data['contractName'],
+                                                        contractAddress=outputlist[0],
+                                                        transactionHash=transaction_data['txid'],
+                                                        blockNumber=transaction_data['blockheight'],
+                                                        blockHash=transaction_data['blockhash']))
+                    system_session.commit()
+
+                    # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+                    connection = create_database_connection('system_dbs', {'db_name': 'system'})
+                    firstInteractionCheck = connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+                    if len(firstInteractionCheck) == 0:
+                        connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+                    connection.close()
+                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-externaltrigger-participation')
+                    return 1
+
+                else:
+                    logger.info("Something went wrong in the smartcontract token transfer method")
+                    return 0
+            elif partialTransferCounter == 1:
+                # Transfer only part of the tokens users specified, till the time it reaches maximum amount
+                returnval = transferToken(parsed_data['tokenIdentification'], perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited), inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo=blockinfo)
+                if returnval != 0:
+                    # Store participant details in the smart contract's db
+                    session.add(ContractParticipants(participantAddress=inputadd,
+                                                      tokenAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited),
+                                                      userChoice=parsed_data['userChoice'],
+                                                      transactionHash=transaction_data['txid'],
+                                                      blockNumber=transaction_data['blockheight'],
+                                                      blockHash=transaction_data['blockhash']))
+                    session.commit()
+                    session.close()
+
+                    # Store transfer as part of ContractTransactionHistory
+                    add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited), blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+
+                    # Store a mapping of participant address -> Contract participated in
+                    system_session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+                    system_session.add(ContractAddressMapping(address=inputadd, addressType='participant',
+                                                        tokenAmount=perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited),
+                                                        contractName=parsed_data['contractName'],
+                                                        contractAddress=outputlist[0],
+                                                        transactionHash=transaction_data['txid'],
+                                                        blockNumber=transaction_data['blockheight'],
+                                                        blockHash=transaction_data['blockhash']))
+                    system_session.commit()
+                    system_session.close()
+                    updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-externaltrigger-participation')
+                    return 1
+
+                else:
+                    logger.info("Something went wrong in the smartcontract token transfer method")
+                    return 0
+
+        else:
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as wrong user choice entered for the Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]}"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+
+    elif 'payeeAddress' in contractStructure:
+        # This means the contract is of the type internal trigger
+        if partialTransferCounter == 0:
+            transferAmount = parsed_data['tokenAmount']
+        elif partialTransferCounter == 1:
+            transferAmount = perform_decimal_operation('subtraction', maximumsubscriptionamount, amountDeposited)
+
+        # Check if the tokenAmount being transferred exists in the address & do the token transfer
+        returnval = transferToken(parsed_data['tokenIdentification'], transferAmount, inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo=blockinfo)
+        if returnval != 0:
+            # Store participant details in the smart contract's db
+            session.add(ContractParticipants(participantAddress=inputadd, tokenAmount=transferAmount, userChoice='-', transactionHash=transaction_data['txid'], blockNumber=transaction_data['blockheight'], blockHash=transaction_data['blockhash']))
+
+            # Store transfer as part of ContractTransactionHistory
+            add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=transferAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+            session.commit()
+            session.close()
+
+            # Store a mapping of participant address -> Contract participated in
+            system_session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+            system_session.add(ContractAddressMapping(address=inputadd, addressType='participant',
+                                                tokenAmount=transferAmount,
+                                                contractName=parsed_data['contractName'],
+                                                contractAddress=outputlist[0],
+                                                transactionHash=transaction_data['txid'],
+                                                blockNumber=transaction_data['blockheight'],
+                                                blockHash=transaction_data['blockhash']))
+            system_session.commit()
+
+            # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+            connection = create_database_connection('system_dbs', {'db_name': 'system'})
+            firstInteractionCheck = connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+            if len(firstInteractionCheck) == 0:
+                connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+            connection.close()
+            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='ote-internaltrigger-participation')
+            return 1
+
+        else:
+            logger.info("Something went wrong in the smartcontract token transfer method")
+            return 0
+
+    return 1  # Indicate successful processing of the one-time event transfer
+
+
+
+
+
+def process_continuous_event_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd, connection, contract_session, contractStructure):
+    logger.info(f"Processing continuous event transfer for transaction {transaction_data['txid']}")
+
+    # Determine the subtype of the contract
+    contract_subtype = contract_session.query(ContractStructure.value).filter(ContractStructure.attribute == 'subtype').first()[0]
+                    
+
+    if contract_subtype == 'tokenswap':
+        # Check if the transaction hash already exists in the contract db (Safety check)
+        participantAdd_txhash = connection.execute('SELECT participantAddress, transactionHash FROM contractparticipants').fetchall()
+        participantAdd_txhash_T = list(zip(*participantAdd_txhash))
+
+        if len(participantAdd_txhash) != 0 and transaction_data['txid'] in list(participantAdd_txhash_T[1]):
+            logger.warning(f"Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+            pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+            return 0
+
+        # if contractAddress was passed, then check if it matches the output address of this contract
+        if 'contractAddress' in parsed_data:
+            if parsed_data['contractAddress'] != outputlist[0]:
+                rejectComment = f"Contract participation at transaction {transaction_data['txid']} rejected as contractAddress specified in flodata, {parsed_data['contractAddress']}, doesnt not match with transaction's output address {outputlist[0]}"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                # Pass information to SSE channel
+                pushData_SSEapi(f"Error| Mismatch in contract address specified in flodata and the output address of the transaction {transaction_data['txid']}")
+                return 0
+        
+        if contractStructure['pricetype'] in ['predetermined','determined']:
+            swapPrice = float(contractStructure['price'])
+        elif contractStructure['pricetype'] == 'dynamic':
+            # Oracle address cannot be a participant in the contract. Check if the sender address is oracle address
+            if transaction_data['senderAddress'] == contractStructure['oracle_address']:
+                logger.warning(f"Transaction {transaction_data['txid']} rejected as the oracle addess {contractStructure['oracle_address']} is attempting to participate. Please report this to the contract owner")
+                pushData_SSEapi(f"Transaction {transaction_data['txid']} rejected as the oracle addess {contractStructure['oracle_address']} is attempting to participate. Please report this to the contract owner")
+                return 0
+
+            swapPrice = fetchDynamicSwapPrice(connection, blockinfo)
+
+        swapAmount = perform_decimal_operation('division', parsed_data['tokenAmount'], swapPrice)
+
+        # Check if the swap amount is available in the deposits of the selling token 
+        # if yes do the transfers, otherwise reject the transaction 
+        # 
+        subquery = contract_session.query(func.max(ContractDeposits.id)).group_by(ContractDeposits.transactionHash)
+        active_contract_deposits = contract_session.query(ContractDeposits).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status != 'consumed').filter(ContractDeposits.status == 'active').all()
+
+        # todo - what is the role of the next line? cleanup if not useful
+        available_deposits = active_contract_deposits[:]
+
+        # available_deposit_sum = contract_session.query(func.sum(ContractDeposits.depositBalance)).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
+
+        query_data = contract_session.query(ContractDeposits.depositBalance).filter(ContractDeposits.id.in_(subquery)).filter(ContractDeposits.status != 'deposit-return').filter(ContractDeposits.status == 'active').all()
+
+        available_deposit_sum = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+        if available_deposit_sum==0 or available_deposit_sum[0][0] is None:
+            available_deposit_sum = 0
+        else:
+            available_deposit_sum = float(available_deposit_sum[0][0])
+
+
+        if available_deposit_sum >= swapAmount:
+            # Accepting token transfer from participant to smart contract address
+            logger.info(f"Accepting 'tokenswapParticipation' transaction ID {transaction_data['txid']} from participant {inputlist[0]} for {parsed_data['tokenAmount']} {parsed_data['tokenIdentification']}# to smart contract address for swap amount {swapAmount} and swap-price {swapPrice}")
+            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0], outputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapParticipation')
+            if returnval == 0:
+                logger.info("ERROR | Something went wrong in the token transfer method while doing local Smart Contract Participation")
+                return 0
+
+            # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+            systemdb_connection = create_database_connection('system_dbs', {'db_name': 'system'})
+            firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+            if len(firstInteractionCheck) == 0:
+                systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+            systemdb_connection.close()
+
+            # ContractDepositTable 
+            # For each unique deposit( address, expirydate, blocknumber) there will be 2 entries added to the table 
+            # the consumption of the deposits will start form the top of the table 
+            deposit_counter = 0 
+            remaining_amount = swapAmount 
+            for a_deposit in available_deposits:
+                if a_deposit.depositBalance > remaining_amount:
+                    # accepting token transfer from the contract to depositor's address 
+                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiply', remaining_amount, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                    if returnval == 0:
+                        logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
+                        return 0
+
+                    # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+                    systemdb_connection = create_database_connection('system_dbs', {'db_name':'system'})
+                    firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{a_deposit.depositorAddress}' AND token='{contractStructure['accepting_token']}'").fetchall()
+                    if len(firstInteractionCheck) == 0:
+                        systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{a_deposit.depositorAddress}', '{contractStructure['accepting_token']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+                    systemdb_connection.close()
+
+
+                    contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
+                                                            depositAmount= perform_decimal_operation('subtraction', 0, remaining_amount),
+                                                            status='deposit-honor',
+                                                            transactionHash= a_deposit.transactionHash,
+                                                            blockNumber= blockinfo['height'],
+                                                            blockHash= blockinfo['hash']))
+                    
+                    # if the total is consumsed then the following entry won't take place 
+                    contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
+                                                            depositBalance= perform_decimal_operation('subtraction', a_deposit.depositBalance, remaining_amount),
+                                                            expiryTime = a_deposit.expiryTime,
+                                                            unix_expiryTime = a_deposit.unix_expiryTime,
+                                                            status='active',
+                                                            transactionHash= a_deposit.transactionHash,
+                                                            blockNumber= blockinfo['height'],
+                                                            blockHash= blockinfo['hash']))
+                    # ConsumedInfoTable 
+                    contract_session.add(ConsumedInfo(  id_deposittable= a_deposit.id,
+                                                        transactionHash= a_deposit.transactionHash,
+                                                        blockNumber= blockinfo['height']))
+                    remaining_amount = perform_decimal_operation('subtraction', remaining_amount, a_deposit.depositBalance)
+                    remaining_amount = 0 
+                    break
+                                
+
+                elif a_deposit.depositBalance <= remaining_amount:
+                    # accepting token transfer from the contract to depositor's address 
+                    logger.info(f"Performing 'tokenswapSettlement' transaction ID {transaction_data['txid']} from participant {a_deposit.depositorAddress} for {perform_decimal_operation('multiplication', a_deposit.depositBalance, swapPrice)} {contractStructure['accepting_token']}# ")
+                    returnval = transferToken(contractStructure['accepting_token'], perform_decimal_operation('multiplication', a_deposit.depositBalance, swapPrice), contractStructure['contractAddress'], a_deposit.depositorAddress, transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapDepositSettlement')
+                    if returnval == 0:
+                        logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption deposit swap operation")
+                        return 0
+
+                    # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+                    systemdb_connection = create_database_connection('system_dbs', {'db_name':'system'})
+                    firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{a_deposit.depositorAddress}' AND token='{contractStructure['accepting_token']}'").fetchall()
+                    if len(firstInteractionCheck) == 0:
+                        systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{a_deposit.depositorAddress}', '{contractStructure['accepting_token']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+                    systemdb_connection.close()
+
+                    
+                    contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
+                                                            depositAmount= perform_decimal_operation('subtraction', 0, a_deposit.depositBalance),
+                                                            status='deposit-honor',
+                                                            transactionHash= a_deposit.transactionHash,
+                                                            blockNumber= blockinfo['height'],
+                                                            blockHash= blockinfo['hash']))
+
+                    contract_session.add(ContractDeposits(  depositorAddress= a_deposit.depositorAddress,
+                                                            depositBalance= 0,
+                                                            expiryTime = a_deposit.expiryTime,
+                                                            unix_expiryTime = a_deposit.unix_expiryTime,
+                                                            status='consumed',
+                                                            transactionHash= a_deposit.transactionHash,
+                                                            blockNumber= blockinfo['height'],
+                                                            blockHash= blockinfo['hash']))
+                    # ConsumedInfoTable 
+                    contract_session.add(ConsumedInfo(  id_deposittable= a_deposit.id,
+                                                        transactionHash= a_deposit.transactionHash,
+                                                        blockNumber= blockinfo['height']))
+                    remaining_amount = perform_decimal_operation('subtraction', remaining_amount, a_deposit.depositBalance)
+
+                    systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
+                    systemdb_entry = systemdb_session.query(TimeActions.activity, TimeActions.contractType, TimeActions.tokens_db, TimeActions.parsed_data).filter(TimeActions.transactionHash == a_deposit.transactionHash).first()
+                    systemdb_session.add(TimeActions(
+                        time = a_deposit.expiryTime,
+                        activity = systemdb_entry[0],
+                        status = 'consumed',
+                        contractName = parsed_data['contractName'],
+                        contractAddress = outputlist[0],
+                        contractType = systemdb_entry[1],
+                        tokens_db = systemdb_entry[2],
+                        parsed_data = systemdb_entry[3],
+                        transactionHash = a_deposit.transactionHash,
+                        blockNumber = blockinfo['height']
+                    ))
+                    systemdb_session.commit()
+                    del systemdb_session
+
+            # token transfer from the contract to participant's address 
+            logger.info(f"Performing 'tokenswapParticipationSettlement' transaction ID {transaction_data['txid']} from participant {outputlist[0]} for {swapAmount} {contractStructure['selling_token']}# ")
+            returnval = transferToken(contractStructure['selling_token'], swapAmount, outputlist[0], inputlist[0], transaction_data=transaction_data, parsed_data=parsed_data, isInfiniteToken=None, blockinfo=blockinfo, transactionType='tokenswapParticipationSettlement')
+            if returnval == 0:
+                logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Particiaption")
+                return 0
+            
+            # ContractParticipationTable 
+            contract_session.add(ContractParticipants(participantAddress = transaction_data['senderAddress'], tokenAmount= parsed_data['tokenAmount'], userChoice= swapPrice, transactionHash= transaction_data['txid'], blockNumber= blockinfo['height'], blockHash= blockinfo['hash'], winningAmount = swapAmount))
+
+            add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=outputlist[0], transactionType='participation', transactionSubType='swap', sourceFloAddress=inputlist[0], destFloAddress=outputlist[0], transferAmount=swapAmount, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+            
+            contract_session.commit()
+            contract_session.close()
+
+            # If this is the first interaction of the participant's address with the given token name, add it to token mapping
+            systemdb_connection = create_database_connection('system_dbs', {'db_name':'system'})
+            firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{inputlist[0]}' AND token='{contractStructure['selling_token']}'").fetchall()
+            if len(firstInteractionCheck) == 0:
+                systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{inputlist[0]}', '{contractStructure['selling_token']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+            systemdb_connection.close()
+
+            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}", transactionType='tokenswapParticipation')
+            pushData_SSEapi(f"Token swap successfully performed at contract {parsed_data['contractName']}-{outputlist[0]} with the transaction {transaction_data['txid']}")
+
+        else:
+            # Reject the participation saying not enough deposit tokens are available
+            rejectComment = f"Swap participation at transaction {transaction_data['txid']} rejected as requested swap amount is {swapAmount} but {available_deposit_sum} is available"
+            logger.info(rejectComment)
+            rejected_transaction_history(transaction_data, parsed_data, inputlist[0], outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+
+    return 1  # Indicate successful processing of the continuous event transfer
+
+
+
+
+def process_smart_contract_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+    # Check if the smart contract exists
+    if check_database_existence('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}):
+        connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
+        contract_session = create_database_session_orm('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"}, ContractBase)
+        
+        contractStructure = extract_contractStructure(parsed_data['contractName'], outputlist[0])
+
+        # Fetch the contract type
+        contract_type = contract_session.query(ContractStructure.value).filter(ContractStructure.attribute == 'contractType').first()[0]
+
+        # Process based on contract type
+        if contract_type == 'one-time-event':
+            return process_one_time_event_transfer(parsed_data, transaction_data, blockinfo, inputlist, outputlist, inputadd, connection, contract_session, contractStructure)
+
+        elif contract_type == 'continuous-event':
+            return process_continuous_event_transfer(parsed_data, transaction_data, blockinfo, inputlist, outputlist, inputadd, connection, contract_session, contractStructure)
+
+        else:
+            rejectComment = f"Smart contract transfer at transaction {transaction_data['txid']} rejected due to unknown contract type"
+            logger.info(rejectComment)
+            rejected_transaction_history(transaction_data, parsed_data, inputlist[0], outputlist[0], rejectComment)
+            return 0
+
+    else:
+        rejectComment = f"Smart contract transfer at transaction {transaction_data['txid']} rejected as the smart contract does not exist"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputlist[0], outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+
+
+
+def process_nft_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+    if not is_a_contract_address(inputlist[0]) and not is_a_contract_address(outputlist[0]):
+        # check if the token exists in the database
+        if check_database_existence('token', {'token_name':f"{parsed_data['tokenIdentification']}"}):
+            # Pull details of the token type from system.db database 
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            db_details = connection.execute("SELECT db_name, db_type, keyword, object_format FROM databaseTypeMapping WHERE db_name='{}'".format(parsed_data['tokenIdentification']))
+            db_details = list(zip(*db_details))
+            if db_details[1][0] == 'infinite-token':
+                db_object = json.loads(db_details[3][0])
+                if db_object['root_address'] == inputlist[0]:
+                    isInfiniteToken = True
+                else:
+                    isInfiniteToken = False
+            else:
+                isInfiniteToken = False
+
+            # Check if the transaction hash already exists in the token db
+            connection = create_database_connection('token', {'token_name':f"{parsed_data['tokenIdentification']}"})
+            blockno_txhash = connection.execute('SELECT blockNumber, transactionHash FROM transactionHistory').fetchall()
+            connection.close()
+            blockno_txhash_T = list(zip(*blockno_txhash))
+
+            if transaction_data['txid'] in list(blockno_txhash_T[1]):
+                logger.warning(f"Transaction {transaction_data['txid']} already exists in the token db. This is unusual, please check your code")
+                pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} already exists in the token db. This is unusual, please check your code")
+                return 0
+            
+            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['tokenAmount'], inputlist[0],outputlist[0], transaction_data, parsed_data, isInfiniteToken=isInfiniteToken, blockinfo = blockinfo)
+            if returnval == 0:
+                logger.info("Something went wrong in the token transfer method")
+                pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
+                return 0
+            else:
+                updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}", transactionType='token-transfer')
+
+            # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            firstInteractionCheck = connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+
+            if len(firstInteractionCheck) == 0:
+                connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+
+            connection.close()
+
+            # Pass information to SSE channel
+            headers = {'Accept': 'application/json', 'Content-Type': 'application/json'}
+            # r = requests.post(tokenapi_sse_url, json={f"message': 'Token Transfer | name:{parsed_data['tokenIdentification']} | transactionHash:{transaction_data['txid']}"}, headers=headers)
+            return 1
+        else:
+            rejectComment = f"Token transfer at transaction {transaction_data['txid']} rejected as a token with the name {parsed_data['tokenIdentification']} doesnt not exist"
+            logger.info(rejectComment)                    
+            rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+    
+    else:
+        rejectComment = f"Token transfer at transaction {transaction_data['txid']} rejected as either the input address or the output address is part of a contract address"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+
+# todo Rule 47 - If the parsed data type is token incorporation, then check if the name hasn't been taken already
+#  if it has been taken then reject the incorporation. Else incorporate it
+def process_token_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+    logger.info("Processing token incorporation...")
+
+    if not is_a_contract_address(inputlist[0]):
+        if not check_database_existence('token', {'token_name':f"{parsed_data['tokenIdentification']}"}):
+            session = create_database_session_orm('token', {'token_name': f"{parsed_data['tokenIdentification']}"}, TokenBase)
+            session.add(ActiveTable(address=inputlist[0], parentid=0, transferBalance=parsed_data['tokenAmount'], addressBalance=parsed_data['tokenAmount'], blockNumber=blockinfo['height']))
+            session.add(TransferLogs(sourceFloAddress=inputadd, destFloAddress=outputlist[0],
+                                    transferAmount=parsed_data['tokenAmount'], sourceId=0, destinationId=1,
+                                    blockNumber=transaction_data['blockheight'], time=transaction_data['time'],
+                                    transactionHash=transaction_data['txid']))            
+            
+            add_transaction_history(token_name=parsed_data['tokenIdentification'], sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=parsed_data['tokenAmount'], blockNumber=transaction_data['blockheight'], blockHash=transaction_data['blockhash'], blocktime=transaction_data['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=parsed_data['type'], parsedFloData=json.dumps(parsed_data))
+            
+            session.commit()
+            session.close()
+
+            # add it to token address to token mapping db table
+            connection = create_database_connection('system_dbs', {'db_name':'system'})
+            connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{inputadd}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}');")
+            connection.execute(f"INSERT INTO databaseTypeMapping (db_name, db_type, keyword, object_format, blockNumber) VALUES ('{parsed_data['tokenIdentification']}', 'token', '', '', '{transaction_data['blockheight']}')")
+            connection.close()
+
+            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}")
+            logger.info(f"Token | Successfully incorporated token {parsed_data['tokenIdentification']} at transaction {transaction_data['txid']}")
+            pushData_SSEapi(f"Token | Successfully incorporated token {parsed_data['tokenIdentification']} at transaction {transaction_data['txid']}")
+            return 1
+        else:
+            rejectComment = f"Token incorporation rejected at transaction {transaction_data['txid']} as token {parsed_data['tokenIdentification']} already exists"
+            logger.info(rejectComment)
+            rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+    else:
+        rejectComment = f"Token incorporation at transaction {transaction_data['txid']} rejected as either the input address is part of a contract address"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+#   Rule 48 - If the parsed data type if smart contract incorporation, then check if the name hasn't been taken already
+#      if it has been taken then reject the incorporation.
+def process_smart_contract_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+        logger.info(f"Processing smart contract incorporation for transaction {transaction_data['txid']}")
+
+        if not check_database_existence('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{parsed_data['contractAddress']}"}):
+            # Cannot incorporate on an address with any previous token transaction
+            systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
+            tokenAddressMapping_of_contractAddress = systemdb_session.query(TokenAddressMapping).filter(TokenAddressMapping.tokenAddress == parsed_data['contractAddress']).all()
+            if len(tokenAddressMapping_of_contractAddress) == 0:
+                # todo Rule 49 - If the contract name hasn't been taken before, check if the contract type is an authorized type by the system
+                if parsed_data['contractType'] == 'one-time-event':
+                    logger.info("Smart contract is of the type one-time-event")
+                    # either userchoice or payeeAddress condition should be present. Check for it
+                    if 'userchoices' not in parsed_data['contractConditions'] and 'payeeAddress' not in parsed_data['contractConditions']:
+                        rejectComment = f"Either userchoice or payeeAddress should be part of the Contract conditions.\nSmart contract incorporation on transaction {transaction_data['txid']} rejected"
+                        logger.info(rejectComment)
+                        rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                        delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                        return 0
+
+                    # userchoice and payeeAddress conditions cannot come together. Check for it
+                    if 'userchoices' in parsed_data['contractConditions'] and 'payeeAddress' in parsed_data['contractConditions']:
+                        rejectComment = f"Both userchoice and payeeAddress provided as part of the Contract conditions.\nSmart contract incorporation on transaction {transaction_data['txid']} rejected"
+                        logger.info(rejectComment)
+                        rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                        delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                        return 0
+
+                    # todo Rule 50 - Contract address mentioned in flodata field should be same as the receiver FLO address on the output side
+                    #    henceforth we will not consider any flo private key initiated comment as valid from this address
+                    #    Unlocking can only be done through smart contract system address
+                    if parsed_data['contractAddress'] == inputadd:
+                        session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{parsed_data['contractAddress']}"}, ContractBase)
+                        session.add(ContractStructure(attribute='contractType', index=0, value=parsed_data['contractType']))
+                        session.add(ContractStructure(attribute='subtype', index=0, value=parsed_data['subtype']))
+                        session.add(ContractStructure(attribute='contractName', index=0, value=parsed_data['contractName']))
+                        session.add(ContractStructure(attribute='tokenIdentification', index=0, value=parsed_data['tokenIdentification']))
+                        session.add(ContractStructure(attribute='contractAddress', index=0, value=parsed_data['contractAddress']))
+                        session.add(ContractStructure(attribute='flodata', index=0, value=parsed_data['flodata']))
+                        session.add(ContractStructure(attribute='expiryTime', index=0, value=parsed_data['contractConditions']['expiryTime']))
+                        session.add(ContractStructure(attribute='unix_expiryTime', index=0, value=parsed_data['contractConditions']['unix_expiryTime']))
+                        if 'contractAmount' in parsed_data['contractConditions'].keys():
+                            session.add(ContractStructure(attribute='contractAmount', index=0, value=parsed_data['contractConditions']['contractAmount']))
+
+                        if 'minimumsubscriptionamount' in parsed_data['contractConditions']:
+                            session.add(ContractStructure(attribute='minimumsubscriptionamount', index=0, value=parsed_data['contractConditions']['minimumsubscriptionamount']))
+                        if 'maximumsubscriptionamount' in parsed_data['contractConditions']:
+                            session.add(ContractStructure(attribute='maximumsubscriptionamount', index=0, value=parsed_data['contractConditions']['maximumsubscriptionamount']))
+                        if 'userchoices' in parsed_data['contractConditions']:
+                            for key, value in literal_eval(parsed_data['contractConditions']['userchoices']).items():
+                                session.add(ContractStructure(attribute='exitconditions', index=key, value=value))
+
+                        if 'payeeAddress' in parsed_data['contractConditions']:
+                            # in this case, expirydate( or maximumamount) is the trigger internally. Keep a track of expiry dates
+                            session.add(ContractStructure(attribute='payeeAddress', index=0, value=json.dumps(parsed_data['contractConditions']['payeeAddress'])))
+
+                        # Store transfer as part of ContractTransactionHistory
+                        add_contract_transaction_history(contract_name=parsed_data['contractName'], contract_address=parsed_data['contractAddress'], transactionType='incorporation', transactionSubType=None, sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=None, blockNumber=blockinfo['height'], blockHash=blockinfo['hash'], blocktime=blockinfo['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), parsedFloData=json.dumps(parsed_data))
+                        session.commit()
+                        session.close()
+
+                        # add Smart Contract name in token contract association
+                        blockchainReference = neturl + 'tx/' + transaction_data['txid']
+                        session = create_database_session_orm('token', {'token_name': f"{parsed_data['tokenIdentification']}"}, TokenBase)
+                        session.add(TokenContractAssociation(tokenIdentification=parsed_data['tokenIdentification'],
+                                                            contractName=parsed_data['contractName'],
+                                                            contractAddress=parsed_data['contractAddress'],
+                                                            blockNumber=transaction_data['blockheight'],
+                                                            blockHash=transaction_data['blockhash'],
+                                                            time=transaction_data['time'],
+                                                            transactionHash=transaction_data['txid'],
+                                                            blockchainReference=blockchainReference,
+                                                            jsonData=json.dumps(transaction_data),
+                                                            transactionType=parsed_data['type'],
+                                                            parsedFloData=json.dumps(parsed_data)))
+                        session.commit()
+                        session.close()
+
+                        # Store smart contract address in system's db, to be ignored during future transfers
+                        session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+                        session.add(ActiveContracts(contractName=parsed_data['contractName'],
+                                                    contractAddress=parsed_data['contractAddress'], status='active',
+                                                    tokenIdentification=parsed_data['tokenIdentification'],
+                                                    contractType=parsed_data['contractType'],
+                                                    transactionHash=transaction_data['txid'],
+                                                    blockNumber=transaction_data['blockheight'],
+                                                    blockHash=transaction_data['blockhash'],
+                                                    incorporationDate=transaction_data['time']))
+                        session.commit()
+
+                        session.add(ContractAddressMapping(address=inputadd, addressType='incorporation',
+                                                        tokenAmount=None,
+                                                        contractName=parsed_data['contractName'],
+                                                        contractAddress=inputadd,
+                                                        transactionHash=transaction_data['txid'],
+                                                        blockNumber=transaction_data['blockheight'],
+                                                        blockHash=transaction_data['blockhash']))
+
+                        session.add(DatabaseTypeMapping(db_name=f"{parsed_data['contractName']}-{inputadd}",
+                                                        db_type='smartcontract',
+                                                        keyword='',
+                                                        object_format='',
+                                                        blockNumber=transaction_data['blockheight']))
+
+                        session.add(TimeActions(time=parsed_data['contractConditions']['expiryTime'], 
+                                                activity='contract-time-trigger',
+                                                status='active',
+                                                contractName=parsed_data['contractName'],
+                                                contractAddress=inputadd,
+                                                contractType='one-time-event-trigger',
+                                                tokens_db=json.dumps([parsed_data['tokenIdentification']]),
+                                                parsed_data=json.dumps(parsed_data),
+                                                transactionHash=transaction_data['txid'],
+                                                blockNumber=transaction_data['blockheight']))
+
+                        session.commit()
+                        session.close()
+
+                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{parsed_data['contractAddress']}")
+
+                        pushData_SSEapi('Contract | Contract incorporated at transaction {} with name {}-{}'.format(transaction_data['txid'], parsed_data['contractName'], parsed_data['contractAddress']))
+                        return 1
                     else:
-                        return jsonify(result='error', description="Address hasn't participated in any contract"), 404
+                        rejectComment = f"Contract Incorporation on transaction {transaction_data['txid']} rejected as contract address in Flodata and input address are different"
+                        logger.info(rejectComment)
+                        rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                        pushData_SSEapi(f"Error | Contract Incorporation rejected as address in Flodata and input address are different at transaction {transaction_data['txid']}")
+                        delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                        return 0
+            
+                if parsed_data['contractType'] == 'continuous-event' or parsed_data['contractType'] == 'continuos-event':
+                    logger.debug("Smart contract is of the type continuous-event")
+                    # Add checks to reject the creation of contract
+                    if parsed_data['contractAddress'] == inputadd:
+                        session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{parsed_data['contractAddress']}"}, ContractBase)
+                        session.add(ContractStructure(attribute='contractType', index=0, value=parsed_data['contractType']))
+                        session.add(ContractStructure(attribute='contractName', index=0, value=parsed_data['contractName']))
+                        session.add(ContractStructure(attribute='contractAddress', index=0, value=parsed_data['contractAddress']))
+                        session.add(ContractStructure(attribute='flodata', index=0, value=parsed_data['flodata']))
+                        
+                        if parsed_data['stateF'] != {} and parsed_data['stateF'] is not False:
+                            for key, value in parsed_data['stateF'].items():
+                                session.add(ContractStructure(attribute=f'statef-{key}', index=0, value=value))
+                        
+                        if 'subtype' in parsed_data['contractConditions']:
+                            # todo: Check if the both the tokens mentioned exist if its a token swap
+                            if (parsed_data['contractConditions']['subtype'] == 'tokenswap') and (check_database_existence('token', {'token_name':f"{parsed_data['contractConditions']['selling_token'].split('#')[0]}"})) and (check_database_existence('token', {'token_name':f"{parsed_data['contractConditions']['accepting_token'].split('#')[0]}"})):
+                                session.add(ContractStructure(attribute='subtype', index=0, value=parsed_data['contractConditions']['subtype']))
+                                session.add(ContractStructure(attribute='accepting_token', index=0, value=parsed_data['contractConditions']['accepting_token']))
+                                session.add(ContractStructure(attribute='selling_token', index=0, value=parsed_data['contractConditions']['selling_token']))
 
-                participationDetailsList = []
-                for contract in participant_address_contracts:
-                    detailsDict = {}
-                    contract_name = contract[3]
-                    contract_address = contract[4]
-                    db_name = standardize_db_name(f"{contract_name}_{contract_address}")
+                                if parsed_data['contractConditions']['pricetype'] not in ['predetermined','statef','dynamic']:
+                                    rejectComment = f"pricetype is not part of accepted parameters for a continuos event contract of the type token swap.\nSmart contract incorporation on transaction {transaction_data['txid']} rejected"
+                                    logger.info(rejectComment)
+                                    rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                                    delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                                    return 0
+                                
+                                # determine price
+                                session.add(ContractStructure(attribute='pricetype', index=0, value=parsed_data['contractConditions']['pricetype']))
 
-                    # Fetch participation details from the contract database
-                    async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn_contract:
-                        async with conn_contract.cursor() as cursor_contract:
-                            # Fetch contract structure asynchronously
-                            contractStructure = await fetchContractStructure(contract_name, contract_address)
+                                if parsed_data['contractConditions']['pricetype'] in ['predetermined','statef']:
+                                    session.add(ContractStructure(attribute='price', index=0, value=parsed_data['contractConditions']['price']))
+                                elif parsed_data['contractConditions']['pricetype'] in ['dynamic']:
+                                    session.add(ContractStructure(attribute='price', index=0, value=parsed_data['contractConditions']['price']))
+                                    session.add(ContractStructure(attribute='oracle_address', index=0, value=parsed_data['contractConditions']['oracle_address']))
+                                    
+                                # Store transfer as part of ContractTransactionHistory 
+                                blockchainReference = neturl + 'tx/' + transaction_data['txid']
+                                session.add(ContractTransactionHistory(transactionType='incorporation',
+                                                                        sourceFloAddress=inputadd,
+                                                                        destFloAddress=outputlist[0],
+                                                                        transferAmount=None,
+                                                                        blockNumber=transaction_data['blockheight'],
+                                                                        blockHash=transaction_data['blockhash'],
+                                                                        time=transaction_data['time'],
+                                                                        transactionHash=transaction_data['txid'],
+                                                                        blockchainReference=blockchainReference,
+                                                                        jsonData=json.dumps(transaction_data),
+                                                                        parsedFloData=json.dumps(parsed_data)
+                                                                        ))
+                                session.commit()
+                                session.close()
 
-                            if contractStructure['contractType'] == 'continuos-event' and contractStructure['subtype'] == 'tokenswap':
-                                await cursor_contract.execute("SELECT * FROM contractparticipants WHERE participantAddress = %s", (floAddress,))
-                                participant_details = await cursor_contract.fetchall()
-                                participationList = []
-                                for participation in participant_details:
-                                    detailsDict = {
-                                        'participationAddress': floAddress,
-                                        'participationAmount': participation[2],
-                                        'receivedAmount': float(participation[3]),
-                                        'participationToken': contractStructure['accepting_token'],
-                                        'receivedToken': contractStructure['selling_token'],
-                                        'swapPrice_received_to_participation': float(participation[7]),
-                                        'transactionHash': participation[4],
-                                        'blockNumber': participation[5],
-                                        'blockHash': participation[6],
-                                    }
-                                    participationList.append(detailsDict)
-                                participationDetailsList.append(participationList)
+                                # add Smart Contract name in token contract association
+                                accepting_sending_tokenlist = [parsed_data['contractConditions']['accepting_token'], parsed_data['contractConditions']['selling_token']]
+                                for token_name in accepting_sending_tokenlist:
+                                    token_name = token_name.split('#')[0]
+                                    session = create_database_session_orm('token', {'token_name': f"{token_name}"}, TokenBase)
+                                    session.add(TokenContractAssociation(tokenIdentification=token_name,
+                                                                            contractName=parsed_data['contractName'],
+                                                                            contractAddress=parsed_data['contractAddress'],
+                                                                            blockNumber=transaction_data['blockheight'],
+                                                                            blockHash=transaction_data['blockhash'],
+                                                                            time=transaction_data['time'],
+                                                                            transactionHash=transaction_data['txid'],
+                                                                            blockchainReference=blockchainReference,
+                                                                            jsonData=json.dumps(transaction_data),
+                                                                            transactionType=parsed_data['type'],
+                                                                            parsedFloData=json.dumps(parsed_data)))
+                                    session.commit()
+                                    session.close()
 
-                            elif contractStructure['contractType'] == 'one-time-event' and 'payeeAddress' in contractStructure:
-                                detailsDict['contractName'] = contract_name
-                                detailsDict['contractAddress'] = contract_address
+                                # Store smart contract address in system's db, to be ignored during future transfers
+                                session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+                                session.add(ActiveContracts(contractName=parsed_data['contractName'],
+                                                            contractAddress=parsed_data['contractAddress'], status='active',
+                                                            tokenIdentification=str(accepting_sending_tokenlist),
+                                                            contractType=parsed_data['contractType'],
+                                                            transactionHash=transaction_data['txid'],
+                                                            blockNumber=transaction_data['blockheight'],
+                                                            blockHash=transaction_data['blockhash'],
+                                                            incorporationDate=transaction_data['time']))
+                                session.commit()
 
-                                await cursor_system.execute('''
-                                    SELECT status, tokenIdentification, contractType, blockNumber, blockHash, incorporationDate, expiryDate, closeDate 
-                                    FROM activecontracts 
-                                    WHERE contractName = %s AND contractAddress = %s
-                                ''', (contract_name, contract_address))
-                                temp = await cursor_system.fetchone()
-                                detailsDict.update({
-                                    'status': temp[0],
-                                    'tokenIdentification': temp[1],
-                                    'contractType': temp[2],
-                                    'blockNumber': temp[3],
-                                    'blockHash': temp[4],
-                                    'incorporationDate': temp[5],
-                                    'expiryDate': temp[6],
-                                    'closeDate': temp[7]
-                                })
+                                # todo - Add a condition for rejected contract transaction on the else loop for this condition 
+                                session.add(ContractAddressMapping(address=inputadd, addressType='incorporation',
+                                                                    tokenAmount=None,
+                                                                    contractName=parsed_data['contractName'],
+                                                                    contractAddress=inputadd,
+                                                                    transactionHash=transaction_data['txid'],
+                                                                    blockNumber=transaction_data['blockheight'],
+                                                                    blockHash=transaction_data['blockhash']))
+                                session.add(DatabaseTypeMapping(db_name=f"{parsed_data['contractName']}-{inputadd}",
+                                                                    db_type='smartcontract',
+                                                                    keyword='',
+                                                                    object_format='',
+                                                                    blockNumber=transaction_data['blockheight']))
+                                session.commit()
+                                session.close()
+                                updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{parsed_data['contractAddress']}")
+                                pushData_SSEapi('Contract | Contract incorporated at transaction {} with name {}-{}'.format(transaction_data['txid'], parsed_data['contractName'], parsed_data['contractAddress']))
+                                return 1
+                        
+                            else:
+                                rejectComment = f"One of the token for the swap does not exist.\nSmart contract incorporation on transaction {transaction_data['txid']} rejected"
+                                logger.info(rejectComment)
+                                rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                                delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                                return 0
 
-                                await cursor_contract.execute("SELECT tokenAmount FROM contractparticipants WHERE participantAddress = %s", (floAddress,))
-                                result = await cursor_contract.fetchone()
-                                detailsDict['tokenAmount'] = result[0]
-                                participationDetailsList.append(detailsDict)
-
-                            elif contractStructure['contractType'] == 'one-time-event' and 'exitconditions' in contractStructure:
-                                detailsDict['contractName'] = contract_name
-                                detailsDict['contractAddress'] = contract_address
-
-                                await cursor_system.execute('''
-                                    SELECT status, tokenIdentification, contractType, blockNumber, blockHash, incorporationDate, expiryDate, closeDate 
-                                    FROM activecontracts 
-                                    WHERE contractName = %s AND contractAddress = %s
-                                ''', (contract_name, contract_address))
-                                temp = await cursor_system.fetchone()
-                                detailsDict.update({
-                                    'status': temp[0],
-                                    'tokenIdentification': temp[1],
-                                    'contractType': temp[2],
-                                    'blockNumber': temp[3],
-                                    'blockHash': temp[4],
-                                    'incorporationDate': temp[5],
-                                    'expiryDate': temp[6],
-                                    'closeDate': temp[7]
-                                })
-
-                                await cursor_contract.execute("""
-                                    SELECT userChoice, winningAmount 
-                                    FROM contractparticipants 
-                                    WHERE participantAddress = %s
-                                """, (floAddress,))
-                                result = await cursor_contract.fetchone()
-                                detailsDict['userChoice'] = result[0]
-                                detailsDict['winningAmount'] = result[1]
-                                participationDetailsList.append(detailsDict)
-
-                # Final response based on backend readiness
-                if not is_backend_ready():
-                    return jsonify(
-                        warning=BACKEND_NOT_READY_WARNING,
-                        floAddress=floAddress,
-                        type='participant',
-                        participatedContracts=participationDetailsList
-                    ), 206
-                else:
-                    return jsonify(
-                        floAddress=floAddress,
-                        type='participant',
-                        participatedContracts=participationDetailsList
-                    ), 200
-
-    except Exception as e:
-        print("getParticipantDetails:", e)
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-
-    
-
-@app.route('/api/v1.0/getSmartContractTransactions', methods=['GET'])
-async def getsmartcontracttransactions():
-    try:
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        if not contractName:
-            return jsonify(result='error', description="Smart Contract's name hasn't been passed"), 400
-
-        if not contractAddress:
-            return jsonify(result='error', description="Smart Contract's address hasn't been passed"), 400
-
-        # Standardize the contract database name
-        contract_db_name = standardize_db_name(f"{contractName.strip()}_{contractAddress.strip()}")
-
-        # Establish asynchronous connection to the contract database
-        async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch contract transaction data asynchronously
-                query = '''
-                    SELECT jsonData, parsedFloData 
-                    FROM contractTransactionHistory
-                '''
-                await cursor.execute(query)
-                result = await cursor.fetchall()
-
-                # Process the fetched transaction data
-                returnval = {}
-                for item in result:
-                    transactions_object = {}
-                    transactions_object['transactionDetails'] = json.loads(item[0])
-                    transactions_object['transactionDetails'] = await update_transaction_confirmations(transactions_object['transactionDetails'])
-                    transactions_object['parsedFloData'] = json.loads(item[1])
-                    returnval[transactions_object['transactionDetails']['txid']] = transactions_object
-
-        # Check backend readiness
-        if not is_backend_ready():
-            return jsonify(
-                result='ok',
-                warning=BACKEND_NOT_READY_WARNING,
-                contractName=contractName,
-                contractAddress=contractAddress,
-                contractTransactions=returnval
-            ), 206
-        else:
-            return jsonify(
-                result='ok',
-                contractName=contractName,
-                contractAddress=contractAddress,
-                contractTransactions=returnval
-            ), 200
-
-    except aiomysql.MySQLError as e:
-        print(f"MySQL error while fetching transactions: {e}")
-        return jsonify(result='error', description='Database error occurred'), 500
-
-    except Exception as e:
-        print("getSmartContractTransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-
-    
-
-@app.route('/api/v1.0/getBlockDetails/<blockdetail>', methods=['GET'])
-async def getblockdetails(blockdetail):
-    try:
-        blockJson = await blockdetailhelper(blockdetail)
-        if len(blockJson) != 0:
-            blockJson = json.loads(blockJson[0][0])
-            return jsonify(result='ok', blockDetails=blockJson)
-        else:
-            if not is_backend_ready():
-                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+                        else:
+                            rejectComment = f"No subtype provided || mentioned tokens do not exist for the Contract of type continuos event.\nSmart contract incorporation on transaction {transaction_data['txid']} rejected"
+                            logger.info(rejectComment)
+                            rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                            delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                            return 0
+            
             else:
-                return jsonify(result='error', description='Block doesn\'t exist in database')
-    except Exception as e:
-        print("getblockdetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+                rejectComment = f"Smart contract creation transaction {transaction_data['txid']} rejected as token transactions already exist on the address {parsed_data['contractAddress']}"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+                delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+                return 0
 
-
-@app.route('/api/v1.0/getTransactionDetails/<transactionHash>', methods=['GET'])
-async def gettransactiondetails(transactionHash):
-    try:
-        transactionJsonData = await transactiondetailhelper(transactionHash)
-        if len(transactionJsonData) != 0:
-            transactionJson = json.loads(transactionJsonData[0][0])
-            transactionJson = await update_transaction_confirmations(transactionJson)
-            parseResult = json.loads(transactionJsonData[0][1])
-
-            return jsonify(parsedFloData=parseResult, transactionDetails=transactionJson, transactionHash=transactionHash, result='ok')
         else:
-            if not is_backend_ready():
-                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as a Smart Contract with the name {parsed_data['contractName']} at address {parsed_data['contractAddress']} already exists"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'incorporation', inputadd, inputadd, outputlist[0], rejectComment)
+            delete_contract_database({'contract_name': parsed_data['contractName'], 'contract_address': parsed_data['contractAddress']})
+            return 0
+
+def process_smart_contract_pays(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+        logger.info(f"Transaction {transaction_data['txid']} is of the type smartContractPays")
+        committeeAddressList = refresh_committee_list(APP_ADMIN, neturl, blockinfo['time'])
+        # Check if input address is a committee address
+        if inputlist[0] in committeeAddressList:
+            # check if the contract exists
+            if check_database_existence('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"}):
+                # Check if the transaction hash already exists in the contract db (Safety check)
+                connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
+                participantAdd_txhash = connection.execute(f"SELECT sourceFloAddress, transactionHash FROM contractTransactionHistory WHERE transactionType != 'incorporation'").fetchall()
+                participantAdd_txhash_T = list(zip(*participantAdd_txhash))
+
+                if len(participantAdd_txhash) != 0 and transaction_data['txid'] in participantAdd_txhash_T[1]:
+                    logger.warning(f"Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+                    pushData_SSEapi(f"Error | Transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code")
+                    return 0
+
+                # pull out the contract structure into a dictionary
+                contractStructure = extract_contractStructure(parsed_data['contractName'], outputlist[0])
+
+                # if contractAddress has been passed, check if output address is contract Incorporation address
+                if 'contractAddress' in contractStructure:
+                    if outputlist[0] != contractStructure['contractAddress']:
+                        rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]} hasn't expired yet"
+                        logger.warning(rejectComment)
+                        rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                        pushData_SSEapi(rejectComment)
+                        return 0
+
+                # check the type of smart contract ie. external trigger or internal trigger
+                if 'payeeAddress' in contractStructure:
+                    rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]} has an internal trigger"
+                    logger.warning(rejectComment)
+                    rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                    pushData_SSEapi(rejectComment)
+                    return 0
+
+                # check the status of the contract
+                contractStatus = check_contract_status(parsed_data['contractName'], outputlist[0])                
+                contractList = []
+
+                if contractStatus == 'closed':
+                    rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart contract {parsed_data['contractName']} at the {outputlist[0]} is closed"
+                    logger.info(rejectComment)
+                    rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                    return 0
+                else:
+                    session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+                    result = session.query(ContractStructure).filter_by(attribute='expiryTime').all()
+                    session.close()
+                    if result:
+                        # now parse the expiry time in python
+                        expirytime = result[0].value.strip()
+                        expirytime_split = expirytime.split(' ')
+                        parse_string = '{}/{}/{} {}'.format(expirytime_split[3], parsing.months[expirytime_split[1]], expirytime_split[2], expirytime_split[4])
+                        expirytime_object = parsing.arrow.get(parse_string, 'YYYY/M/D HH:mm:ss').replace(tzinfo=expirytime_split[5][3:])
+                        blocktime_object = parsing.arrow.get(transaction_data['time']).to('Asia/Kolkata')
+
+                        if blocktime_object <= expirytime_object:
+                            rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart contract {parsed_data['contractName']}-{outputlist[0]} has not expired and will not trigger"
+                            logger.info(rejectComment)
+                            rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                            pushData_SSEapi(rejectComment)
+                            return 0
+
+                # check if the user choice passed is part of the contract structure
+                tempchoiceList = []
+                for item in contractStructure['exitconditions']:
+                    tempchoiceList.append(contractStructure['exitconditions'][item])
+
+                if parsed_data['triggerCondition'] not in tempchoiceList:
+                    rejectComment = f"Transaction {transaction_data['txid']} rejected as triggerCondition, {parsed_data['triggerCondition']}, has been passed to Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]} which doesn't accept any userChoice of the given name"
+                    logger.info(rejectComment)
+                    rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                    pushData_SSEapi(rejectComment)
+                    return 0
+                
+                systemdb_session = create_database_session_orm('system_dbs', {'db_name':'system'}, SystemBase)
+                        
+                activecontracts_table_info = systemdb_session.query(ActiveContracts.blockHash, ActiveContracts.incorporationDate, ActiveContracts.expiryDate).filter(ActiveContracts.contractName==parsed_data['contractName'], ActiveContracts.contractAddress==outputlist[0], ActiveContracts.status=='expired').first()  
+                
+                timeactions_table_info = systemdb_session.query(TimeActions.time, TimeActions.activity, TimeActions.contractType, TimeActions.tokens_db, TimeActions.parsed_data).filter(TimeActions.contractName==parsed_data['contractName'], TimeActions.contractAddress==outputlist[0], TimeActions.status=='active').first() 
+
+                # check if minimumsubscriptionamount exists as part of the contract structure
+                if 'minimumsubscriptionamount' in contractStructure:
+                    # if it has not been reached, close the contract and return money
+                    minimumsubscriptionamount = float(contractStructure['minimumsubscriptionamount'])
+                    session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+                    
+                    # amountDeposited = session.query(func.sum(ContractParticipants.tokenAmount)).all()[0][0]
+                    query_data = session.query(ContractParticipants.tokenAmount).all()
+                    amountDeposited = sum(Decimal(f"{amount[0]}") if amount[0] is not None else Decimal(0) for amount in query_data)
+                    session.close()
+
+                    if amountDeposited is None:
+                        amountDeposited = 0
+
+                    if amountDeposited < minimumsubscriptionamount:
+                        # close the contract and return the money
+                        logger.info('Minimum subscription amount hasn\'t been reached\n The token will be returned back')
+                        # Initialize payback to contract participants
+                        connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
+                        contractParticipants = connection.execute('SELECT participantAddress, tokenAmount, transactionHash FROM contractparticipants').fetchall()[0][0]
+
+                        for participant in contractParticipants:
+                            tokenIdentification = connection.execute('SELECT * FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
+                            contractAddress = connection.execute('SELECT value FROM contractstructure WHERE attribute="contractAddress"').fetchall()[0][0]
+                            returnval = transferToken(tokenIdentification, participant[1], contractAddress, participant[0], transaction_data, parsed_data, blockinfo = blockinfo)
+                            if returnval == 0:
+                                logger.info("CRITICAL ERROR | Something went wrong in the token transfer method while doing local Smart Contract Trigger")
+                                return 0
+
+                            connection.execute('update contractparticipants set winningAmount="{}" where participantAddress="{}" and transactionHash="{}"'.format((participant[1], participant[0], participant[4])))
+
+                        # add transaction to ContractTransactionHistory
+                        blockchainReference = neturl + 'tx/' + transaction_data['txid']
+                        session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+                        session.add(ContractTransactionHistory(transactionType='trigger',
+                                                               transactionSubType='minimumsubscriptionamount-payback',
+                                                               sourceFloAddress=inputadd,
+                                                               destFloAddress=outputlist[0],
+                                                               transferAmount=None,
+                                                               blockNumber=transaction_data['blockheight'],
+                                                               blockHash=transaction_data['blockhash'],
+                                                               time=transaction_data['time'],
+                                                               transactionHash=transaction_data['txid'],
+                                                               blockchainReference=blockchainReference,
+                                                               jsonData=json.dumps(transaction_data),
+                                                               parsedFloData=json.dumps(parsed_data)
+                                                               ))
+                        session.commit()
+                        session.close()                       
+
+                        close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, activecontracts_table_info.expiryDate, blockinfo['time'], timeactions_table_info.time, timeactions_table_info.activity, parsed_data['contractName'], outputlist[0], timeactions_table_info.contractType, timeactions_table_info.tokens_db, timeactions_table_info.parsed_data, blockinfo['height'])
+
+                        updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['contractName']}-{outputlist[0]}")
+                        pushData_SSEapi('Trigger | Minimum subscription amount not reached at contract {}-{} at transaction {}. Tokens will be refunded'.format(parsed_data['contractName'], outputlist[0], transaction_data['txid']))
+                        return 1
+
+                # Trigger the contract
+                connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
+                rows = connection.execute('SELECT tokenAmount FROM contractparticipants').fetchall()
+                tokenSum = float(sum(Decimal(f"{row[0]}") for row in rows))
+                
+                if tokenSum > 0:
+                    contractWinners = connection.execute('SELECT * FROM contractparticipants WHERE userChoice="{}"'.format(parsed_data['triggerCondition'])).fetchall()
+
+                    rows = connection.execute('SELECT tokenAmount FROM contractparticipants WHERE userChoice="{}"'.format(parsed_data['triggerCondition'])).fetchall()
+                    winnerSum = float(sum(Decimal(f"{row[0]}") for row in rows))
+
+                    tokenIdentification = connection.execute('SELECT value FROM contractstructure WHERE attribute="tokenIdentification"').fetchall()[0][0]
+
+                    for winner in contractWinners:
+                        winnerAmount = "%.8f" % perform_decimal_operation('multiplication', perform_decimal_operation('division', winner[2], winnerSum), tokenSum)
+                        returnval = transferToken(tokenIdentification, winnerAmount, outputlist[0], winner[1], transaction_data, parsed_data, blockinfo = blockinfo)
+                        if returnval == 0:
+                            logger.critical("Something went wrong in the token transfer method while doing local Smart Contract Trigger")
+                            return 0
+                        
+                        connection.execute(f"INSERT INTO contractwinners (participantAddress, winningAmount, userChoice, transactionHash, blockNumber, blockHash, referenceTxHash) VALUES('{winner[1]}', {winnerAmount}, '{parsed_data['triggerCondition']}', '{transaction_data['txid']}','{blockinfo['height']}','{blockinfo['hash']}', '{winner[4]}');")
+
+                # add transaction to ContractTransactionHistory
+                blockchainReference = neturl + 'tx/' + transaction_data['txid']
+                session.add(ContractTransactionHistory(transactionType='trigger',
+                                                       transactionSubType='committee',
+                                                       sourceFloAddress=inputadd,
+                                                       destFloAddress=outputlist[0],
+                                                       transferAmount=None,
+                                                       blockNumber=transaction_data['blockheight'],
+                                                       blockHash=transaction_data['blockhash'],
+                                                       time=transaction_data['time'],
+                                                       transactionHash=transaction_data['txid'],
+                                                       blockchainReference=blockchainReference,
+                                                       jsonData=json.dumps(transaction_data),
+                                                       parsedFloData=json.dumps(parsed_data)
+                                                       ))
+                session.commit()
+                session.close()
+
+                close_expire_contract(contractStructure, 'closed', transaction_data['txid'], blockinfo['height'], blockinfo['hash'], activecontracts_table_info.incorporationDate, activecontracts_table_info.expiryDate, blockinfo['time'], timeactions_table_info['time'], 'contract-time-trigger', contractStructure['contractName'], contractStructure['contractAddress'], contractStructure['contractType'], timeactions_table_info.tokens_db, timeactions_table_info.parsed_data, blockinfo['height'])                
+
+                updateLatestTransaction(transaction_data, parsed_data, f"{contractStructure['contractName']}-{contractStructure['contractAddress']}")
+
+                pushData_SSEapi('Trigger | Contract triggered of the name {}-{} is active currently at transaction {}'.format(parsed_data['contractName'], outputlist[0], transaction_data['txid']))
+                return 1
             else:
-                return jsonify(result='error', description='Transaction doesn\'t exist in database')
-    except Exception as e:
-        print("gettransactiondetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
+                rejectComment = f"Transaction {transaction_data['txid']} rejected as Smart Contract named {parsed_data['contractName']} at the address {outputlist[0]} doesn't exist"
+                logger.info(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'trigger', outputlist[0], inputadd, outputlist[0], rejectComment)
+                pushData_SSEapi(rejectComment)
+                return 0
 
-
-@app.route('/api/v1.0/getLatestTransactionDetails', methods=['GET'])
-async def getLatestTransactionDetails():
-    try:
-        numberOfLatestBlocks = request.args.get('numberOfLatestBlocks')
-
-        # Standardize the database name and connect to MySQL asynchronously
-        db_name = standardize_db_name('latestCache')
-
-        # Use `async with` for resource management
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                tempdict = {}
-
-                if numberOfLatestBlocks is not None:
-                    # Fetch transactions from the latest blocks based on the specified limit
-                    query = '''
-                        SELECT * 
-                        FROM latestTransactions 
-                        WHERE blockNumber IN (
-                            SELECT DISTINCT blockNumber 
-                            FROM latestTransactions 
-                            ORDER BY blockNumber DESC 
-                            LIMIT %s
-                        ) 
-                        ORDER BY id ASC;
-                    '''
-                    await cursor.execute(query, (int(numberOfLatestBlocks),))
-                else:
-                    # Fetch transactions from all distinct latest blocks
-                    query = '''
-                        SELECT * 
-                        FROM latestTransactions 
-                        WHERE blockNumber IN (
-                            SELECT DISTINCT blockNumber 
-                            FROM latestTransactions 
-                            ORDER BY blockNumber DESC
-                        ) 
-                        ORDER BY id ASC;
-                    '''
-                    await cursor.execute(query)
-
-                # Fetch the transactions asynchronously
-                latestTransactions = await cursor.fetchall()
-
-                # Process each transaction
-                tempdict = {}
-                for item in latestTransactions:
-                    item = list(item)
-                    tx_parsed_details = {}
-
-                    # Parse transaction details
-                    tx_parsed_details['transactionDetails'] = json.loads(item[3])
-                    tx_parsed_details['transactionDetails'] = await update_transaction_confirmations(tx_parsed_details['transactionDetails'])
-                    tx_parsed_details['parsedFloData'] = json.loads(item[5])
-                    tx_parsed_details['parsedFloData']['transactionType'] = item[4]
-                    tx_parsed_details['transactionDetails']['blockheight'] = int(item[2])
-
-                    # Merge parsed details and transaction details
-                    tx_parsed_details = {**tx_parsed_details['transactionDetails'], **tx_parsed_details['parsedFloData']}
-
-                    # Add on-chain flag
-                    tx_parsed_details['onChain'] = True
-
-                    # Add transaction to the dictionary using txid as the key
-                    tempdict[json.loads(item[3])['txid']] = tx_parsed_details
-
-                # Respond based on backend readiness
-                if not is_backend_ready():
-                    return jsonify(
-                        result='ok',
-                        warning=BACKEND_NOT_READY_WARNING,
-                        latestTransactions=tempdict
-                    ), 206
-                else:
-                    return jsonify(result='ok', latestTransactions=tempdict), 200
-
-    except Exception as e:
-        print("getLatestTransactionDetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
-
-
-    
-
-
-@app.route('/api/v1.0/getLatestBlockDetails', methods=['GET'])
-async def getLatestBlockDetails():
-    try:
-        limit = request.args.get('limit')
-
-        # Standardize the database name
-        db_name = standardize_db_name('latestCache')
-
-        # Use `async with` for resource management
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Default query for the latest 4 blocks if no limit is provided
-                query = '''
-                    SELECT * 
-                    FROM (
-                        SELECT * 
-                        FROM latestBlocks 
-                        ORDER BY blockNumber DESC 
-                        LIMIT %s
-                    ) AS subquery 
-                    ORDER BY id ASC;
-                '''
-
-                # Set the limit for the query
-                limit = int(limit) if limit is not None else 4
-
-                # Execute the query
-                await cursor.execute(query, (limit,))
-                latestBlocks = await cursor.fetchall()
-
-                # Parse the block details
-                tempdict = {}
-                for item in latestBlocks:
-                    tempdict[json.loads(item[3])['hash']] = json.loads(item[3])
-
-        # Respond based on backend readiness
-        if not is_backend_ready():
-            return jsonify(result='ok', warning=BACKEND_NOT_READY_WARNING, latestBlocks=tempdict), 206
         else:
-            return jsonify(result='ok', latestBlocks=tempdict), 200
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as input address, {inputlist[0]}, is not part of the committee address list"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
 
-    except Exception as e:
-        print("getLatestBlockDetails:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR), 500
+
+def process_smart_contract_deposit(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+        if check_database_existence('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"}):
+            # Reject if the deposit expiry time is greater than incorporated blocktime
+            expiry_time = convert_datetime_to_arrowobject(parsed_data['depositConditions']['expiryTime'])
+            if blockinfo['time'] > expiry_time.timestamp():
+                rejectComment = f"Contract deposit of transaction {transaction_data['txid']} rejected as expiryTime before current block time"
+                logger.warning(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'deposit', outputlist[0], inputadd, outputlist[0], rejectComment)
+                return 0
+
+            # Check if the transaction hash already exists in the contract db (Safety check)
+            connection = create_database_connection('smart_contract', {'contract_name':f"{parsed_data['contractName']}", 'contract_address':f"{outputlist[0]}"})
+            participantAdd_txhash = connection.execute('SELECT participantAddress, transactionHash FROM contractparticipants').fetchall()
+            participantAdd_txhash_T = list(zip(*participantAdd_txhash))
+
+            if len(participantAdd_txhash) != 0 and transaction_data['txid'] in list(participantAdd_txhash_T[1]):
+                rejectComment = f"Contract deposit at transaction {transaction_data['txid']} rejected as it already exists in the Smart Contract db. This is unusual, please check your code"
+                logger.warning(rejectComment)
+                rejected_contract_transaction_history(transaction_data, parsed_data, 'deposit', outputlist[0], inputadd, outputlist[0], rejectComment)
+                return 0
+
+            # if contractAddress was passed, then check if it matches the output address of this contract
+            if 'contractAddress' in parsed_data:
+                if parsed_data['contractAddress'] != outputlist[0]:
+                    rejectComment = f"Contract deposit at transaction {transaction_data['txid']} rejected as contractAddress specified in flodata, {parsed_data['contractAddress']}, doesnt not match with transaction's output address {outputlist[0]}"
+                    logger.info(rejectComment)
+                    rejected_contract_transaction_history(transaction_data, parsed_data, 'participation', outputlist[0], inputadd, outputlist[0], rejectComment)
+                    # Pass information to SSE channel
+                    pushData_SSEapi(f"Error| Mismatch in contract address specified in flodata and the output address of the transaction {transaction_data['txid']}")
+                    return 0
+
+            # pull out the contract structure into a dictionary
+            contractStructure = extract_contractStructure(parsed_data['contractName'], outputlist[0])
+
+            # Transfer the token 
+            logger.info(f"Initiating transfers for smartcontract deposit with transaction ID {transaction_data['txid']}")
+            returnval = transferToken(parsed_data['tokenIdentification'], parsed_data['depositAmount'], inputlist[0], outputlist[0], transaction_data, parsed_data, blockinfo=blockinfo)
+            if returnval == 0:
+                logger.info("Something went wrong in the token transfer method")
+                pushData_SSEapi(f"Error | Something went wrong while doing the internal db transactions for {transaction_data['txid']}")
+                return 0 
+
+            # Push the deposit transaction into deposit database contract database 
+            session = create_database_session_orm('smart_contract', {'contract_name': f"{parsed_data['contractName']}", 'contract_address': f"{outputlist[0]}"}, ContractBase)
+            blockchainReference = neturl + 'tx/' + transaction_data['txid']
+            session.add(ContractDeposits(depositorAddress = inputadd, depositAmount = parsed_data['depositAmount'], depositBalance = parsed_data['depositAmount'], expiryTime = parsed_data['depositConditions']['expiryTime'], unix_expiryTime = convert_datetime_to_arrowobject(parsed_data['depositConditions']['expiryTime']).timestamp(), status = 'active', transactionHash = transaction_data['txid'], blockNumber = transaction_data['blockheight'], blockHash = transaction_data['blockhash']))
+            session.add(ContractTransactionHistory(transactionType = 'smartContractDeposit',
+                                                    transactionSubType = None,
+                                                    sourceFloAddress = inputadd,
+                                                    destFloAddress = outputlist[0],
+                                                    transferAmount = parsed_data['depositAmount'],
+                                                    blockNumber = transaction_data['blockheight'],
+                                                    blockHash = transaction_data['blockhash'],
+                                                    time = transaction_data['time'],
+                                                    transactionHash = transaction_data['txid'],
+                                                    blockchainReference = blockchainReference,
+                                                    jsonData = json.dumps(transaction_data),
+                                                    parsedFloData = json.dumps(parsed_data)
+                                                    ))
+            session.commit()
+            session.close()
+
+            session = create_database_session_orm('system_dbs', {'db_name': f"system"}, SystemBase)
+            session.add(TimeActions(time=parsed_data['depositConditions']['expiryTime'], 
+                                    activity='contract-deposit',
+                                    status='active',
+                                    contractName=parsed_data['contractName'],
+                                    contractAddress=outputlist[0],
+                                    contractType='continuos-event-swap',
+                                    tokens_db=f"{parsed_data['tokenIdentification']}",
+                                    parsed_data=json.dumps(parsed_data),
+                                    transactionHash=transaction_data['txid'],
+                                    blockNumber=transaction_data['blockheight']))
+            session.commit()
+            pushData_SSEapi(f"Deposit Smart Contract Transaction {transaction_data['txid']} for the Smart contract named {parsed_data['contractName']} at the address {outputlist[0]}")
+
+            # If this is the first interaction of the outputlist's address with the given token name, add it to token mapping
+            systemdb_connection = create_database_connection('system_dbs', {'db_name':'system'})
+            firstInteractionCheck = systemdb_connection.execute(f"SELECT * FROM tokenAddressMapping WHERE tokenAddress='{outputlist[0]}' AND token='{parsed_data['tokenIdentification']}'").fetchall()
+            if len(firstInteractionCheck) == 0:
+                systemdb_connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{outputlist[0]}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}')")
+            systemdb_connection.close()
+            
+            updateLatestTransaction(transaction_data, parsed_data , f"{parsed_data['contractName']}-{outputlist[0]}")
+            return 1
+
+        else:
+            rejectComment = f"Deposit Transaction {transaction_data['txid']} rejected as a Smart Contract with the name {parsed_data['contractName']} at address {outputlist[0]} doesnt exist"
+            logger.info(rejectComment)
+            rejected_contract_transaction_history(transaction_data, parsed_data, 'smartContractDeposit', outputlist[0], inputadd, outputlist[0], rejectComment)
+            return 0
+
+def process_nft_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd):
+    '''
+            DIFFERENT BETWEEN TOKEN AND NFT
+            System.db will have a different entry
+            in creation nft word will be extra
+            NFT Hash must be present
+            Creation and transfer amount .. only integer parts will be taken
+            Keyword nft must be present in both creation and transfer
+    '''
+
+    if not is_a_contract_address(inputlist[0]):
+        if not check_database_existence('token', {'token_name': f"{parsed_data['tokenIdentification']}"}):
+            session = create_database_session_orm('token', {'token_name': f"{parsed_data['tokenIdentification']}"}, TokenBase)
+            session.add(ActiveTable(address=inputlist[0], parentid=0, transferBalance=parsed_data['tokenAmount'], addressBalance=parsed_data['tokenAmount'], blockNumber=blockinfo['height']))
+            session.add(TransferLogs(sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=parsed_data['tokenAmount'], sourceId=0, destinationId=1, blockNumber=transaction_data['blockheight'], time=transaction_data['time'], transactionHash=transaction_data['txid']))
+            add_transaction_history(token_name=parsed_data['tokenIdentification'], sourceFloAddress=inputadd, destFloAddress=outputlist[0], transferAmount=parsed_data['tokenAmount'], blockNumber=transaction_data['blockheight'], blockHash=transaction_data['blockhash'], blocktime=transaction_data['time'], transactionHash=transaction_data['txid'], jsonData=json.dumps(transaction_data), transactionType=parsed_data['type'], parsedFloData=json.dumps(parsed_data))
+
+            session.commit()
+            session.close()
+
+            # Add it to token address to token mapping db table
+            connection = create_database_connection('system_dbs', {'db_name': 'system'})
+            connection.execute(f"INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES ('{inputadd}', '{parsed_data['tokenIdentification']}', '{transaction_data['txid']}', '{transaction_data['blockheight']}', '{transaction_data['blockhash']}');")
+            nft_data = {'sha256_hash': f"{parsed_data['nftHash']}"}
+            connection.execute(f"INSERT INTO databaseTypeMapping (db_name, db_type, keyword, object_format, blockNumber) VALUES ('{parsed_data['tokenIdentification']}', 'nft', '', '{json.dumps(nft_data)}', '{transaction_data['blockheight']}')")
+            connection.close()
+
+            updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}")
+            pushData_SSEapi(f"NFT | Successfully incorporated NFT {parsed_data['tokenIdentification']} at transaction {transaction_data['txid']}")
+            return 1
+        else:
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as an NFT with the name {parsed_data['tokenIdentification']} has already been incorporated"
+            logger.info(rejectComment)
+            rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+    else:
+        rejectComment = f"NFT incorporation at transaction {transaction_data['txid']} rejected as either the input address is part of a contract address"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
+
+def process_infinite_token_incorporation(parsed_data, transaction_data, blockinfo, inputlist, outputlist, inputadd):
+    logger.info(f"Processing infinite token incorporation for transaction {transaction_data['txid']}")
+
+    # Ensure that neither the input nor output addresses are contract addresses
+    if not is_a_contract_address(inputlist[0]) and not is_a_contract_address(outputlist[0]):
+        # Check if the token already exists in the database
+        if not check_database_existence('token', {'token_name': f"{parsed_data['tokenIdentification']}"}):
+            parsed_data['tokenAmount'] = 0
+
+            # Create a session to manage token incorporation
+            try:
+                tokendb_session = create_database_session_orm('token', {'token_name': f"{parsed_data['tokenIdentification']}"}, TokenBase)
+
+                # Add initial token data to the database
+                tokendb_session.add(
+                    ActiveTable(
+                        address=inputlist[0],
+                        parentid=0,
+                        transferBalance=parsed_data['tokenAmount'],
+                        blockNumber=blockinfo['height']
+                    )
+                )
+                tokendb_session.add(
+                    TransferLogs(
+                        sourceFloAddress=inputadd,
+                        destFloAddress=outputlist[0],
+                        transferAmount=parsed_data['tokenAmount'],
+                        sourceId=0,
+                        destinationId=1,
+                        blockNumber=transaction_data['blockheight'],
+                        time=transaction_data['time'],
+                        transactionHash=transaction_data['txid']
+                    )
+                )
+
+                # Add the transaction history for the token
+                add_transaction_history(
+                    token_name=parsed_data['tokenIdentification'],
+                    sourceFloAddress=inputadd,
+                    destFloAddress=outputlist[0],
+                    transferAmount=parsed_data['tokenAmount'],
+                    blockNumber=transaction_data['blockheight'],
+                    blockHash=transaction_data['blockhash'],
+                    blocktime=blockinfo['time'],
+                    transactionHash=transaction_data['txid'],
+                    jsonData=json.dumps(transaction_data),
+                    transactionType=parsed_data['type'],
+                    parsedFloData=json.dumps(parsed_data)
+                )
+
+                # Add to token address mapping
+                connection = create_database_connection('system_dbs', {'db_name': 'system'})
+                connection.execute("INSERT INTO tokenAddressMapping (tokenAddress, token, transactionHash, blockNumber, blockHash) VALUES (%s, %s, %s, %s, %s)", (inputadd, parsed_data['tokenIdentification'], transaction_data['txid'], transaction_data['blockheight'], transaction_data['blockhash']))
+
+
+                # Add to database type mapping
+                info_object = {'root_address': inputadd}
+                connection.execute("INSERT INTO databaseTypeMapping (db_name, db_type, keyword, object_format, blockNumber) VALUES (%s, %s, %s, %s, %s)", (parsed_data['tokenIdentification'], 'infinite-token', '', json.dumps(info_object), transaction_data['blockheight']))
+
+
+                # Commit the session and close connections
+                updateLatestTransaction(transaction_data, parsed_data, f"{parsed_data['tokenIdentification']}")
+                tokendb_session.commit()
+                logger.info(f"Token | Successfully incorporated token {parsed_data['tokenIdentification']} at transaction {transaction_data['txid']}")
+
+            except Exception as e:
+                logger.error(f"Error during infinite token incorporation: {e}")
+                tokendb_session.rollback()
+                return 0
+            finally:
+                connection.close()
+                tokendb_session.close()
+
+            pushData_SSEapi(f"Token | Successfully incorporated token {parsed_data['tokenIdentification']} at transaction {transaction_data['txid']}")
+            return 1
+        else:
+            rejectComment = f"Transaction {transaction_data['txid']} rejected as a token with the name {parsed_data['tokenIdentification']} has already been incorporated"
+            logger.info(rejectComment)
+            rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+            pushData_SSEapi(rejectComment)
+            return 0
+    else:
+        rejectComment = f"Infinite token incorporation at transaction {transaction_data['txid']} rejected as either the input address or output address is part of a contract address"
+        logger.info(rejectComment)
+        rejected_transaction_history(transaction_data, parsed_data, inputadd, outputlist[0], rejectComment)
+        pushData_SSEapi(rejectComment)
+        return 0
 
 
 
+# Main processing functions START
+
+def processTransaction(transaction_data, parsed_data, blockinfo):
     
+    inputlist, outputlist, inputadd = process_flo_checks(transaction_data)
 
-@app.route('/api/v1.0/getBlockTransactions/<blockdetail>', methods=['GET'])
-async def getblocktransactions(blockdetail):
-    try:
-        blockJson = await blockdetailhelper(blockdetail)
-        if len(blockJson) != 0:
-            blockJson = json.loads(blockJson[0][0])
-            blocktxlist = blockJson['tx']
-            blocktxs = {}
-            for i in range(len(blocktxlist)):
-                temptx = await transactiondetailhelper(blocktxlist[i])                        
-                transactionJson = json.loads(temptx[0][0])
-                transactionJson = await update_transaction_confirmations(transactionJson)
-                parseResult = json.loads(temptx[0][1])
-                blocktxs[blocktxlist[i]] = {
-                    "parsedFloData" : parseResult,
-                    "transactionDetails" : transactionJson
+    if inputlist is None or outputlist is None:
+        return 0
+
+    logger.info(f"Input address list : {inputlist}")
+    logger.info(f"Output address list : {outputlist}")
+
+    transaction_data['senderAddress'] = inputlist[0]
+    transaction_data['receiverAddress'] = outputlist[0]
+
+    # Process transaction based on type
+    if parsed_data['type'] == 'transfer':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type transfer")
+
+        if parsed_data['transferType'] == 'token':
+            return process_token_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+        elif parsed_data['transferType'] == 'smartContract':
+            return process_smart_contract_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+        elif parsed_data['transferType'] == 'nft':
+            return process_nft_transfer(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+        else:
+            logger.info(f"Invalid transfer type in transaction {transaction_data['txid']}")
+            return 0
+
+    elif parsed_data['type'] == 'tokenIncorporation':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type tokenIncorporation")
+        return process_token_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    elif parsed_data['type'] == 'smartContractIncorporation':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type smartContractIncorporation")
+        return process_smart_contract_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    elif parsed_data['type'] == 'smartContractPays':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type smartContractPays")
+        return process_smart_contract_pays(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    elif parsed_data['type'] == 'smartContractDeposit':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type smartContractDeposit")
+        return process_smart_contract_deposit(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    elif parsed_data['type'] == 'nftIncorporation':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type nftIncorporation")
+        return process_nft_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    elif parsed_data['type'] == 'infiniteTokenIncorporation':
+        logger.info(f"Transaction {transaction_data['txid']} is of the type infiniteTokenIncorporation")
+        return process_infinite_token_incorporation(parsed_data, transaction_data, blockinfo,inputlist, outputlist, inputadd)
+
+    else:
+        logger.info(f"Transaction {transaction_data['txid']} rejected as it doesn't belong to any valid type")
+        return 0
+
+    return 1
+
+def scanBlockchain():
+    # Read start block no
+    while True:
+        try:
+            session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+            startblock = int(session.query(SystemData).filter_by(attribute='lastblockscanned').all()[0].value) + 1
+            session.commit()
+            session.close()
+            break
+        except:
+            logger.info(f"Unable to connect to 'system' database... retrying in {DB_RETRY_TIMEOUT} seconds")
+            time.sleep(DB_RETRY_TIMEOUT)
+
+    # todo Rule 6 - Find current block height
+    #      Rule 7 - Start analysing the block contents from starting block to current height
+
+    # Find current block height
+    current_index = -1
+    while(current_index == -1):
+        response = newMultiRequest('blocks')
+        try:
+            current_index = response['backend']['blocks']
+        except:
+            logger.info('Latest block count response from multiRequest() is not in the right format. Displaying the data received in the log below')
+            logger.info(response)
+            logger.info('Program will wait for 1 seconds and try to reconnect')
+            time.sleep(1)
+        else:
+            logger.info("Current block height is %s" % str(current_index))
+            break
+    
+    for blockindex in range(startblock, current_index):
+        if blockindex in IGNORE_BLOCK_LIST:
+            continue
+        processBlock(blockindex=blockindex) 
+
+    # At this point the script has updated to the latest block
+    # Now we connect to Blockbook's websocket API to get information about the latest blocks
+
+def switchNeturl(currentneturl):
+    # Use modulo operation to simplify the logic
+    neturlindex = serverlist.index(currentneturl)
+    return serverlist[(neturlindex + 1) % len(serverlist)]
+
+
+def reconnectWebsocket(socket_variable):
+    # Switch a to different Blockbook
+    # neturl = switchNeturl(neturl)
+    # Connect to Blockbook websocket to get data on new incoming blocks
+    i=0
+    newurl = serverlist[0]
+    while(not socket_variable.connected):
+        logger.info(f"While loop {i}")
+        logger.info(f"Sleeping for 3 seconds before attempting reconnect to {newurl}")
+        time.sleep(3)
+        try:
+            scanBlockchain()
+            logger.info(f"Websocket endpoint which is being connected to {newurl}socket.io/socket.io.js")
+            socket_variable.connect(f"{newurl}socket.io/socket.io.js")
+            i=i+1
+        except:
+            logger.info(f"disconnect block: Failed reconnect attempt to {newurl}")
+            newurl = switchNeturl(newurl)
+            i=i+1
+
+
+def get_websocket_uri(testnet=False):
+    if testnet:
+        return "wss://blockbook-testnet.ranchimall.net/websocket"
+    else:
+        return "wss://blockbook.ranchimall.net/websocket"
+
+async def connect_to_websocket(uri):
+    while True:
+        try:
+            async with websockets.connect(uri) as websocket:
+                subscription_request = {
+                    "id": "0",
+                    "method": "subscribeNewBlock",
+                    "params": {}
                 }
-            return jsonify(result='ok', transactions=blocktxs, blockKeyword=blockdetail)
-        else:
-            if not is_backend_ready():
-                return jsonify(result='error', description=BACKEND_NOT_READY_ERROR)
-            else:
-                return jsonify(result='error', description='Block doesn\'t exist in database')
+                await websocket.send(json.dumps(subscription_request))
+                while True:
+                    response = await websocket.recv()
+                    logger.info(f"Received: {response}")
+                    response = json.loads(response)
+                    if 'height' in response['data'].keys():
+                        if response['data']['height'] is None or response['data']['height']=='':
+                            print('blockheight is none')
+                            # todo: remove these debugger lines
+                        if response['data']['hash'] is None or response['data']['hash']=='':
+                            print('blockhash is none')
+                            # todo: remove these debugger lines
+                            # If this is the issue need to proceed forward only once blockbook has consolitated 
+                        processBlock(blockindex=response['data']['height'], blockhash=response['data']['hash'])
+        
+        except Exception as e:
+            logger.info(f"Connection error: {e}")
+            # Add a delay before attempting to reconnect
+            await asyncio.sleep(5)  # You can adjust the delay as needed
+            scanBlockchain()
 
 
-    except Exception as e:
-        print("getblocktransactions:", e)
-        return jsonify(result='error', description=INTERNAL_ERROR)
-    
+# MAIN EXECUTION STARTS 
+# Configuration of required variables 
+config = configparser.ConfigParser()
+config.read('config.ini')
 
-@app.route('/api/v1.0/categoriseString/<urlstring>', methods=['GET'])
-async def categoriseString(urlstring):
-    try:
-        # Check if the hash is of a transaction asynchronously
-        async with aiohttp.ClientSession() as session:
-            async with session.get(f"{apiUrl}api/v1/tx/{urlstring}") as response:
-                if response.status == 200:
-                    return jsonify(type="transaction"), 200
+class MySQLConfig:
+    def __init__(self):
+        self.username = config['MYSQL']['USERNAME']
+        self.password = config['MYSQL']['PASSWORD']
+        self.host = config['MYSQL']['HOST']
+        self.database_prefix = config['MYSQL']['DATABASE_PREFIX']
 
-            # Check if the hash is of a block asynchronously
-            async with session.get(f"{apiUrl}api/v1/block/{urlstring}") as response:
-                if response.status == 200:
-                    return jsonify(type="block"), 200
+mysql_config = MySQLConfig()
 
-        # Initialize variables for database handling
-        database_prefix = f"{mysql_config.database_prefix}_"
-        database_suffix = "_db"
-        token_names = set()
-        contract_list = []
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.DEBUG)
 
-        # Connect to MySQL information_schema using async `get_mysql_connection`
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn_info:
-            async with conn_info.cursor() as cursor_info:
-                # Query to fetch all databases matching the prefix and suffix
-                await cursor_info.execute(
-                    f"SELECT SCHEMA_NAME FROM SCHEMATA WHERE SCHEMA_NAME LIKE '{database_prefix}%' AND SCHEMA_NAME LIKE '%{database_suffix}'"
-                )
-                databases = await cursor_info.fetchall()
 
-                # Separate token databases and smart contract databases
-                for db in databases:
-                    stripped_name = db[0][len(database_prefix):-len(database_suffix)]
-                    
-                    # Exclude "latestCache" and "system" databases
-                    if stripped_name in ["latestCache", "system"]:
+# Suppress SQLAlchemy engine logs
+logging.getLogger('sqlalchemy.engine').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.pool').setLevel(logging.WARNING)
+logging.getLogger('sqlalchemy.dialects').setLevel(logging.WARNING)
+
+formatter = logging.Formatter('%(asctime)s:%(name)s:%(message)s')
+DATA_PATH = os.path.dirname(os.path.abspath(__file__))
+file_handler = logging.FileHandler(os.path.join(DATA_PATH, 'tracking.log'))
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(formatter)
+
+stream_handler = logging.StreamHandler()
+stream_handler.setFormatter(formatter)
+
+logger.addHandler(file_handler)
+logger.addHandler(stream_handler)
+
+
+#  Rule 1     - Read command line arguments to reset the databases as blank
+#  Rule 2     - Read config to set testnet/mainnet
+#  Rule 3     - Set flo blockexplorer location depending on testnet or mainnet
+#  Rule 4     - Set the local flo-cli path depending on testnet or mainnet ( removed this feature | Blockbooks are the only source )
+#  Rule 5     - Set the block number to scan from
+
+
+# Read command line arguments
+parser = argparse.ArgumentParser(description='Script tracks RMT using FLO data on the FLO blockchain - https://flo.cash')
+parser.add_argument('-r', '--reset', nargs='?', const=1, type=int, help='Purge existing db and rebuild it from scratch')
+parser.add_argument('-rb', '--rebuild', nargs='?', const=1, type=int, help='Rebuild it')
+parser.add_argument("--keywords", nargs="+", help="List of keywords to filter transactions during rebuild.", required=False)
+parser.add_argument("--testnet", action="store_true", help="Use the testnet URL")
+
+args = parser.parse_args()
+
+# Read configuration
+
+# todo - write all assertions to make sure default configs are right 
+if (config['DEFAULT']['NET'] != 'mainnet') and (config['DEFAULT']['NET'] != 'testnet'):
+    logger.error("NET parameter in config.ini invalid. Options are either 'mainnet' or 'testnet'. Script is exiting now")
+    sys.exit(0)
+
+# Specify mainnet and testnet server list for API calls and websocket calls 
+# Specify ADMIN ID
+serverlist = None
+if config['DEFAULT']['NET'] == 'mainnet':
+    serverlist = config['DEFAULT']['MAINNET_BLOCKBOOK_SERVER_LIST']
+    APP_ADMIN = 'FNcvkz9PZNZM3HcxM1XTrVL4tgivmCkHp9'
+    websocket_uri = get_websocket_uri(testnet=False)
+elif config['DEFAULT']['NET'] == 'testnet':
+    serverlist = config['DEFAULT']['TESTNET_BLOCKBOOK_SERVER_LIST']
+    APP_ADMIN = 'oWooGLbBELNnwq8Z5YmjoVjw8GhBGH3qSP'
+    websocket_uri = get_websocket_uri(testnet=True)
+serverlist = serverlist.split(',')
+neturl = config['DEFAULT']['BLOCKBOOK_NETURL']
+api_url = neturl
+tokenapi_sse_url = config['DEFAULT']['TOKENAPI_SSE_URL']
+API_VERIFY = config['DEFAULT']['API_VERIFY']
+if API_VERIFY == 'False':
+    API_VERIFY = False
+elif API_VERIFY == 'True':
+    API_VERIFY = True
+else:
+    API_VERIFY = True
+
+
+IGNORE_BLOCK_LIST = config['DEFAULT']['IGNORE_BLOCK_LIST'].split(',')
+IGNORE_BLOCK_LIST = [int(s) for s in IGNORE_BLOCK_LIST]
+IGNORE_TRANSACTION_LIST = config['DEFAULT']['IGNORE_TRANSACTION_LIST'].split(',')
+
+
+def init_system_db(startblock):
+    # Initialize system.db
+    session = create_database_session_orm('system_dbs', {'db_name': "system"}, SystemBase)
+    session.add(SystemData(attribute='lastblockscanned', value=startblock - 1))
+    session.commit()
+    session.close()
+
+def init_lastestcache_db():
+    # Initialize latest cache DB
+    session = create_database_session_orm('system_dbs', {'db_name': "latestCache"}, LatestCacheBase)
+    session.commit()
+    session.close()
+
+def init_storage_if_not_exist(reset=False, exclude_backups=False):
+    """
+    Initialize or reset the storage by creating or dropping/recreating system and cache databases.
+    When reset=True, also drops all token and smart contract databases.
+
+    Args:
+        reset (bool): If True, resets the databases by dropping and recreating them.
+        exclude_backups (bool): If True, skips dropping databases with '_backup' in their names.
+    """
+    def ensure_database_exists(database_name, init_function=None):
+        engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/", echo=False)
+        with engine.connect() as connection:
+            # Drop and recreate the database if reset is True
+            if reset:
+                if exclude_backups and "_backup" in database_name:
+                    logger.info(f"Skipping reset for backup database '{database_name}'.")
+                else:
+                    connection.execute(f"DROP DATABASE IF EXISTS `{database_name}`")
+                    logger.info(f"Database '{database_name}' dropped for reset.")
+            logger.info(f"Rechecking database '{database_name}' exists.")
+            connection.execute(f"CREATE DATABASE IF NOT EXISTS `{database_name}`")
+            logger.info(f"Database '{database_name}' ensured to exist.")
+            # Run initialization function if provided
+            if init_function:
+                init_function()
+
+    def drop_token_and_smartcontract_databases():
+        """
+        Drop all token and smart contract databases when reset is True.
+        Token databases: Named with prefix {prefix}_{token_name}_db.
+        Smart contract databases: Named with prefix {prefix}_{contract_name}_{contract_address}_db.
+        """
+        engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/", echo=False)
+        with engine.connect() as connection:
+            logger.info("Dropping all token and smart contract databases as part of reset.")
+            result = connection.execute("SHOW DATABASES")
+            databases = [row[0] for row in result.fetchall()]
+            for db_name in databases:
+                if db_name.startswith(f"{mysql_config.database_prefix}_") and "_db" in db_name:
+                    if exclude_backups and "_backup" in db_name:
+                        logger.info(f"Skipping backup database '{db_name}'.")
                         continue
+                    if not db_name.endswith("system_db") and not db_name.endswith("latestCache_db"):
+                        connection.execute(f"DROP DATABASE IF EXISTS `{db_name}`")
+                        logger.info(f"Dropped database '{db_name}'.")
 
-                    parts = stripped_name.split('_')
-                    if len(parts) == 1:  # Token database
-                        token_names.add(stripped_name.lower())
-                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):  # Smart contract database
-                        contract_list.append({
-                            "contractName": parts[0],
-                            "contractAddress": parts[1]
-                        })
+    if reset:
+        # Drop all token and smart contract databases
+        drop_token_and_smartcontract_databases()
 
-        # Check if the string matches a token name
-        if urlstring.lower() in token_names:
-            return jsonify(type="token"), 200
+    # Initialize the system database
+    system_db_name = f"{mysql_config.database_prefix}_system_db"
+    ensure_database_exists(system_db_name, lambda: init_system_db(int(config['DEFAULT']['START_BLOCK'])))
 
-        # Connect to the system database asynchronously to check for smart contracts
-        async with await get_mysql_connection("system", USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                await cursor_system.execute("SELECT DISTINCT contractName FROM activeContracts")
-                smart_contract_names = {row[0].lower() for row in await cursor_system.fetchall()}
-
-                if urlstring.lower() in smart_contract_names:
-                    return jsonify(type="smartContract"), 200
-
-        # If no match, classify as noise
-        return jsonify(type="noise"), 200
-
-    except Exception as e:
-        print("categoriseString:", e)
-        return jsonify(result="error", description=INTERNAL_ERROR), 500
+    # Initialize the latest cache database
+    latest_cache_db_name = f"{mysql_config.database_prefix}_latestCache_db"
+    ensure_database_exists(latest_cache_db_name, init_lastestcache_db)
 
 
+def fetch_current_block_height():
+    """
+    Fetch the current block height from the blockchain using the `newMultiRequest` function.
 
-@app.route('/api/v1.0/getTokenSmartContractList', methods=['GET'])
-async def getTokenSmartContractList():
+    :return: The current block height as an integer.
+    """
+    current_index = -1
+    while current_index == -1:  # Keep trying until a valid block height is retrieved
+        try:
+            response = newMultiRequest('blocks')  # Make the API call
+            current_index = response['backend']['blocks']  # Extract block height from response
+            logger.info(f"Current block height fetched: {current_index}")
+        except Exception as e:
+            logger.error(f"Error fetching current block height: {e}")
+            logger.info("Program will wait for 1 second and try to reconnect.")
+            time.sleep(1)  # Wait before retrying
+
+    return current_index
+
+
+def backup_database_to_temp(original_db, backup_db):
+    """
+    Back up the original database schema and data into a new temporary backup database.
+
+    :param original_db: Name of the original database.
+    :param backup_db: Name of the backup database.
+    :return: True if successful, False otherwise.
+    """
     try:
-        # Prefix and suffix for databases
-        database_prefix = f"{mysql_config.database_prefix}_"
-        database_suffix = "_db"
-
-        # Initialize lists
-        token_list = []
-        contract_list = []
-
-        # Connect to MySQL information schema using `get_mysql_connection` with `no_standardize`
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn_info:
-            async with conn_info.cursor() as cursor_info:
-                # Query all databases matching the prefix and suffix
-                await cursor_info.execute(
-                    f"SELECT SCHEMA_NAME FROM SCHEMATA WHERE SCHEMA_NAME LIKE '{database_prefix}%' AND SCHEMA_NAME LIKE '%{database_suffix}'"
-                )
-                all_databases = [row[0] for row in await cursor_info.fetchall()]
-
-                # Separate token and smart contract databases
-                for db_name in all_databases:
-                    stripped_name = db_name[len(database_prefix):-len(database_suffix)]
-                    
-                    # Exclude "latestCache" and "system" databases
-                    if stripped_name in ["latestCache", "system"]:
-                        continue
-
-                    parts = stripped_name.split('_')
-
-                    if len(parts) == 1:  # Token database
-                        token_list.append(stripped_name)
-                    elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):  # Smart contract database
-                        contract_list.append({
-                            "contractName": parts[0],
-                            "contractAddress": parts[1]
-                        })
-
-        # Populate smart contract details
-        async with await get_mysql_connection("system", USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                await cursor_system.execute("SELECT * FROM activeContracts")
-                all_contracts_detail_list = await cursor_system.fetchall()
-
-                for contract in all_contracts_detail_list:
-                    for item in contract_list:
-                        if item["contractName"] == contract[1] and item["contractAddress"] == contract[2]:
-                            item.update({
-                                "status": contract[3],
-                                "tokenIdentification": contract[4],
-                                "contractType": contract[5],
-                                "transactionHash": contract[6],
-                                "blockNumber": contract[7],
-                                "blockHash": contract[8],
-                                "incorporationDate": contract[9],
-                                "expiryDate": contract[10] if contract[10] else None,
-                                "closeDate": contract[11] if contract[11] else None,
-                            })
-
-        # Return response
-        if not is_backend_ready():
-            return jsonify(
-                tokens=token_list,
-                warning=BACKEND_NOT_READY_WARNING,
-                smartContracts=contract_list,
-                result="ok"
-            ), 206
-        else:
-            return jsonify(
-                tokens=token_list,
-                smartContracts=contract_list,
-                result="ok"
-            ), 200
-
-    except aiomysql.MySQLError as e:
-        print("Database error in getTokenSmartContractList:", e)
-        return jsonify(result="error", description="Database error occurred"), 500
+        # Ensure the backup database exists
+        engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/", echo=False)
+        with engine.connect() as connection:
+            logger.info(f"Creating backup database '{backup_db}'...")
+            connection.execute(f"DROP DATABASE IF EXISTS `{backup_db}`")
+            connection.execute(f"CREATE DATABASE `{backup_db}`")
+            logger.info(f"Temporary backup database '{backup_db}' created successfully.")
+            
+            # Verify database creation
+            result = connection.execute(f"SHOW DATABASES LIKE '{backup_db}'").fetchone()
+            if not result:
+                raise RuntimeError(f"Backup database '{backup_db}' was not created successfully.")
     except Exception as e:
-        print("getTokenSmartContractList:", e)
-        return jsonify(result="error", description=INTERNAL_ERROR), 500
+        logger.error(f"Failed to create backup database '{backup_db}': {e}")
+        return False
 
-    
-
-
-###################
-###  VERSION 2  ###
-###################
-
-@app.route('/api/v2/info', methods=['GET'])
-async def info():
     try:
-        # Standardize database names
-        system_db_name = standardize_db_name("system")
-        latest_cache_db_name = standardize_db_name("latestCache")
+        # Reflect original database schema
+        original_engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{original_db}", echo=False)
+        backup_engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{backup_db}", echo=False)
 
-        # Initialize data variables
-        tokenAddressCount = tokenCount = contractCount = lastscannedblock = 0
-        validatedBlockCount = validatedTransactionCount = 0
+        logger.info(f"Connecting to original database: {original_engine.url}")
+        logger.info(f"Connecting to backup database: {backup_engine.url}")
 
-        # Use async with for resource management
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                # Query for the number of FLO addresses in tokenAddress mapping
-                await cursor_system.execute("SELECT COUNT(DISTINCT tokenAddress) FROM tokenAddressMapping")
-                tokenAddressCount = (await cursor_system.fetchone())[0]
+        from sqlalchemy.schema import MetaData
+        metadata = MetaData()
+        metadata.reflect(bind=original_engine)
+        metadata.create_all(bind=backup_engine)
 
-                await cursor_system.execute("SELECT COUNT(DISTINCT token) FROM tokenAddressMapping")
-                tokenCount = (await cursor_system.fetchone())[0]
+        SessionOriginal = sessionmaker(bind=original_engine)
+        SessionBackup = sessionmaker(bind=backup_engine)
+        session_original = SessionOriginal()
+        session_backup = SessionBackup()
 
-                await cursor_system.execute("SELECT COUNT(DISTINCT contractName) FROM contractAddressMapping")
-                contractCount = (await cursor_system.fetchone())[0]
+        for table in metadata.sorted_tables:
+            table_name = table.name
+            logger.info(f"Copying data from table '{table_name}'...")
+            data = session_original.execute(table.select()).fetchall()
 
-                await cursor_system.execute("SELECT value FROM systemData WHERE attribute='lastblockscanned'")
-                lastscannedblock = int((await cursor_system.fetchone())[0])
-
-        async with await get_mysql_connection(latest_cache_db_name, USE_ASYNC=True) as conn_latest_cache:
-            async with conn_latest_cache.cursor() as cursor_latest_cache:
-                # Query for total number of validated blocks
-                await cursor_latest_cache.execute("SELECT COUNT(DISTINCT blockNumber) FROM latestBlocks")
-                validatedBlockCount = (await cursor_latest_cache.fetchone())[0]
-
-                await cursor_latest_cache.execute("SELECT COUNT(DISTINCT transactionHash) FROM latestTransactions")
-                validatedTransactionCount = (await cursor_latest_cache.fetchone())[0]
-
-        # Construct response based on backend readiness
-        response_data = {
-            "systemAddressCount": tokenAddressCount,
-            "systemBlockCount": validatedBlockCount,
-            "systemTransactionCount": validatedTransactionCount,
-            "systemSmartContractCount": contractCount,
-            "systemTokenCount": tokenCount,
-            "lastscannedblock": lastscannedblock
-        }
-
-        if not is_backend_ready():
-            response_data["warning"] = BACKEND_NOT_READY_WARNING
-            return jsonify(response_data), 206
-        else:
-            return jsonify(response_data), 200
-
-    except Exception as e:
-        print("info:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-    
-
-@app.route('/api/v2/broadcastTx/<raw_transaction_hash>')
-async def broadcastTx_v2(raw_transaction_hash):
-    try:
-        p1 = subprocess.run(['flo-cli',f"-datadir={FLO_DATA_DIR}",'sendrawtransaction',raw_transaction_hash], capture_output=True)
-        return jsonify(args=p1.args,returncode=p1.returncode,stdout=p1.stdout.decode(),stderr=p1.stderr.decode()), 200
-
-
-    except Exception as e:
-        print("broadcastTx_v2:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-    
-@app.route('/api/v2/tokenList', methods=['GET'])
-async def tokenList():
-    try:
-        # Initialize token list
-        token_list = []
-
-        # Prefix and suffix for token databases
-        database_prefix = f"{mysql_config.database_prefix}_"
-        database_suffix = "_db"
-
-        # Connect to the MySQL information schema asynchronously
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
+            if data:
+                column_names = [column.name for column in table.columns]
+                data_dicts = [dict(zip(column_names, row)) for row in data]
                 try:
-                    # Query to fetch all databases matching the prefix and suffix
-                    await cursor.execute(
-                        f"SELECT SCHEMA_NAME FROM SCHEMATA WHERE SCHEMA_NAME LIKE '{database_prefix}%' AND SCHEMA_NAME LIKE '%{database_suffix}'"
-                    )
-                    all_databases = [row[0] for row in await cursor.fetchall()]
-
-                    # Filter token databases and exclude smart contract databases
-                    for db_name in all_databases:
-                        stripped_name = db_name[len(database_prefix):-len(database_suffix)]
-
-                        # Exclude "latestCache" and "system" databases
-                        if stripped_name in ["latestCache", "system"]:
-                            continue
-
-                        parts = stripped_name.split('_')
-
-                        # Include token databases and exclude smart contract databases
-                        if len(parts) == 1:  # Token databases have a single part (e.g., usd, inr)
-                            token_list.append(stripped_name)
-                        elif len(parts) == 2 and len(parts[1]) == 34 and (parts[1].startswith('F') or parts[1].startswith('o')):
-                            # Smart contract databases are excluded
-                            continue
-
+                    session_backup.execute(table.insert(), data_dicts)
+                    session_backup.commit()
                 except Exception as e:
-                    print(f"Error querying databases: {e}")
-                    return jsonify(description="Error querying databases"), 500
+                    logger.error(f"Error copying data from table '{table_name}': {e}")
+                    logger.debug(f"Data causing the issue: {data_dicts}")
+                    raise
 
-        # Return response with backend readiness check
-        if not is_backend_ready():
-            return jsonify(warning=BACKEND_NOT_READY_WARNING, tokens=token_list), 206
-        else:
-            return jsonify(tokens=token_list), 200
-
-    except Exception as e:
-        print(f"tokenList:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-
-
-@app.route('/api/v2/tokenInfo/<token>', methods=['GET'])
-async def tokenInfo(token):
-    try:
-        if token is None:
-            return jsonify(description='Token name has not been passed'), 400
-
-        # Standardize database name for the token
-        token_db_name = standardize_db_name(token)
-
-        try:
-            # Connect to the token database asynchronously
-            async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    # Fetch incorporation data
-                    await cursor.execute('SELECT * FROM transactionHistory WHERE id=1')
-                    incorporationRow = await cursor.fetchone()
-
-                    # Fetch distinct active addresses count
-                    await cursor.execute('SELECT COUNT(DISTINCT address) FROM activeTable')
-                    numberOf_distinctAddresses = (await cursor.fetchone())[0]
-
-                    # Fetch total number of transactions
-                    await cursor.execute('SELECT MAX(id) FROM transactionHistory')
-                    numberOf_transactions = (await cursor.fetchone())[0]
-
-                    # Fetch associated contracts
-                    await cursor.execute('''
-                        SELECT contractName, contractAddress, blockNumber, blockHash, transactionHash
-                        FROM tokenContractAssociation
-                    ''')
-                    associatedContracts = await cursor.fetchall()
-
-            # Process associated contracts
-            associatedContractList = [
-                {
-                    'contractName': item[0],
-                    'contractAddress': item[1],
-                    'blockNumber': item[2],
-                    'blockHash': item[3],
-                    'transactionHash': item[4],
-                }
-                for item in associatedContracts
-            ]
-
-            # Prepare the response
-            response = {
-                'token': token,
-                'incorporationAddress': incorporationRow[1],
-                'tokenSupply': incorporationRow[3],
-                'time': incorporationRow[6],
-                'blockchainReference': incorporationRow[7],
-                'activeAddress_no': numberOf_distinctAddresses,
-                'totalTransactions': numberOf_transactions,
-                'associatedSmartContracts': associatedContractList,
-            }
-
-            if not is_backend_ready():
-                return jsonify(warning=BACKEND_NOT_READY_WARNING, **response), 206
-            else:
-                return jsonify(**response), 200
-
-        except aiomysql.MySQLError:
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description="Token database doesn't exist"), 404
+        session_original.close()
+        session_backup.close()
+        logger.info(f"Data successfully backed up to '{backup_db}'.")
+        return True
 
     except Exception as e:
-        print("tokenInfo:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
+        logger.error(f"Error copying data to backup database '{backup_db}': {e}")
+        return False
 
 
-@app.route('/api/v2/tokenTransactions/<token>', methods=['GET'])
-async def tokenTransactions(token):
-    try:
-        if token is None:
-            return jsonify(description='Token name has not been passed'), 400
-
-        # Input validations
-        senderFloAddress = request.args.get('senderFloAddress')
-        if senderFloAddress is not None and not check_flo_address(senderFloAddress, is_testnet):
-            return jsonify(description='senderFloAddress validation failed'), 400
-
-        destFloAddress = request.args.get('destFloAddress')
-        if destFloAddress is not None and not check_flo_address(destFloAddress, is_testnet):
-            return jsonify(description='destFloAddress validation failed'), 400
-
-        limit = request.args.get('limit')
-        if limit is not None and not check_integer(limit):
-            return jsonify(description='limit validation failed'), 400
-
-        use_AND = request.args.get('use_AND')
-        if use_AND is not None and use_AND not in ['True', 'False']:
-            return jsonify(description='use_AND validation failed'), 400
-
-        _from = int(request.args.get('_from', 1))  # Page number, default is 1
-        to = int(request.args.get('to', 100))  # Number of items per page, default is 100
-
-        if _from < 1:
-            return jsonify(description='_from validation failed'), 400
-        if to < 1:
-            return jsonify(description='to validation failed'), 400
-
-        # Construct token database name
-        token_db_name = standardize_db_name(token)
-
-        # Connect to the token database and execute the query asynchronously
-        async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Build the query dynamically
-                query = "SELECT jsonData, parsedFloData FROM transactionHistory WHERE 1=1"
-                params = []
-
-                if senderFloAddress:
-                    query += " AND sourceFloAddress = %s"
-                    params.append(senderFloAddress)
-                if destFloAddress:
-                    query += " AND destFloAddress = %s"
-                    params.append(destFloAddress)
-                if use_AND == 'True' and senderFloAddress and destFloAddress:
-                    query += " AND sourceFloAddress = %s AND destFloAddress = %s"
-                    params.extend([senderFloAddress, destFloAddress])
-
-                query += " ORDER BY id DESC LIMIT %s OFFSET %s"
-                params.extend([to, (_from - 1) * to])
-
-                # Execute the query asynchronously
-                await cursor.execute(query, tuple(params))
-                transactionJsonData = await cursor.fetchall()
-
-        # Process and format transactions asynchronously
-        sortedFormattedTransactions = []
-        for row in transactionJsonData:
-            transactions_object = {}
-            transactions_object['transactionDetails'] = json.loads(row[0])
-            transactions_object['transactionDetails'] = await update_transaction_confirmations(transactions_object['transactionDetails'])
-            transactions_object['parsedFloData'] = json.loads(row[1])
-            sortedFormattedTransactions.append(transactions_object)
-
-        # Prepare response
-        if not is_backend_ready():
-            return jsonify(warning=BACKEND_NOT_READY_WARNING, token=token, transactions=sortedFormattedTransactions), 206
-        else:
-            return jsonify(token=token, transactions=sortedFormattedTransactions), 200
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error in tokenTransactions: {e}")
-        return jsonify(description="Database error occurred"), 500
-    except Exception as e:
-        print("tokenTransactions:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-    
-
-@app.route('/api/v2/tokenBalances/<token>', methods=['GET'])
-async def tokenBalances(token):
-    try:
-        # Validate the token parameter
-        if not token:
-            return jsonify(description="Token name has not been passed"), 400
-
-        # Standardize the token database name
-        token_db_name = standardize_db_name(token)
-
-        try:
-            # Establish async connection to the token database
-            async with await get_mysql_connection(token_db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    # Fetch balances grouped by address
-                    query = "SELECT address, SUM(transferBalance) FROM activeTable GROUP BY address"
-                    await cursor.execute(query)
-                    addressBalances = await cursor.fetchall()
-
-                    # Create the return dictionary
-                    returnList = {address: balance for address, balance in addressBalances}
-
-        except aiomysql.MySQLError as e:
-            print(f"Database error while fetching balances for token {token}: {e}")
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description="Token database doesn't exist"), 404
-
-        # Prepare and return the response
-        if not is_backend_ready():
-            return jsonify(
-                warning=BACKEND_NOT_READY_WARNING,
-                token=token,
-                balances=returnList
-            ), 206
-        else:
-            return jsonify(
-                token=token,
-                balances=returnList
-            ), 200
-
-    except Exception as e:
-        print("tokenBalances:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-@app.route('/api/v2/floAddressInfo/<floAddress>', methods=['GET'])
-async def floAddressInfo(floAddress):
-    try:
-        if not floAddress:
-            return jsonify(description="floAddress hasn't been passed"), 400
-
-        # Validate the FLO address
-        if not check_flo_address(floAddress, is_testnet):
-            return jsonify(description="floAddress validation failed"), 400
-
-        detail_list = {}
-        incorporated_smart_contracts = []
-
-        # Connect to the system database to fetch associated tokens and contracts
-        async with await get_mysql_connection(standardize_db_name("system"), USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch tokens associated with the FLO address
-                await cursor.execute("SELECT DISTINCT token FROM tokenAddressMapping WHERE tokenAddress = %s", (floAddress,))
-                token_names = [row[0] for row in await cursor.fetchall()]
-
-                # Fetch incorporated smart contracts
-                smart_contract_query = """
-                    SELECT contractName, status, tokenIdentification, contractType, transactionHash, blockNumber, blockHash
-                    FROM activeContracts
-                    WHERE contractAddress = %s
-                """
-                await cursor.execute(smart_contract_query, (floAddress,))
-                incorporated_contracts = await cursor.fetchall()
-
-        # Process token balances concurrently
-        if token_names:
-            tasks = [fetch_token_balance(token, floAddress) for token in token_names]
-            balances = await asyncio.gather(*tasks, return_exceptions=True)
-
-            for token, balance_result in zip(token_names, balances):
-                if isinstance(balance_result, Exception):
-                    print(f"Error fetching balance for token {token}: {balance_result}")
-                else:
-                    detail_list.update(balance_result)
-
-        # Process incorporated contracts
-        for contract in incorporated_contracts:
-            incorporated_smart_contracts.append({
-                'contractName': contract[0],
-                'contractAddress': floAddress,
-                'status': contract[1],
-                'tokenIdentification': contract[2],
-                'contractType': contract[3],
-                'transactionHash': contract[4],
-                'blockNumber': contract[5],
-                'blockHash': contract[6],
-            })
-
-        # Prepare the response
-        response = {
-            'floAddress': floAddress,
-            'floAddressBalances': detail_list or None,
-            'incorporatedSmartContracts': incorporated_smart_contracts or None
-        }
-
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
-    except Exception as e:
-        print(f"floAddressInfo: {e}")
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-@app.route('/api/v2/floAddressBalance/<floAddress>', methods=['GET'])
-async def floAddressBalance(floAddress):
-    try:
-        if not floAddress:
-            return jsonify(description="floAddress hasn't been passed"), 400
-
-        # Validate the FLO address
-        if not check_flo_address(floAddress, is_testnet):
-            return jsonify(description="floAddress validation failed"), 400
-
-        token = request.args.get('token')
-
-        # Case 1: Fetch balances for all associated tokens
-        if not token:
-            async with await get_mysql_connection(standardize_db_name("system"), USE_ASYNC=True) as system_conn:
-                async with system_conn.cursor() as cursor:
-                    # Fetch tokens associated with the FLO address
-                    query = "SELECT DISTINCT token FROM tokenAddressMapping WHERE tokenAddress = %s"
-                    await cursor.execute(query, (floAddress,))
-                    token_names = [row[0] for row in await cursor.fetchall()]
-
-            if not token_names:
-                return jsonify(description="No tokens associated with the FLO address"), 404
-
-            # Fetch balances for each token concurrently
-            tasks = [fetch_token_balance(token_name, floAddress) for token_name in token_names]
-            results = await asyncio.gather(*tasks, return_exceptions=True)
-
-            # Aggregate balances
-            detail_list = {}
-            for token_name, result in zip(token_names, results):
-                if isinstance(result, Exception):
-                    print(f"Error fetching balance for token {token_name}: {result}")
-                else:
-                    detail_list.update(result)
-
-            # Prepare the response
-            response = {
-                'floAddress': floAddress,
-                'floAddressBalances': detail_list
-            }
-            if not is_backend_ready():
-                response['warning'] = BACKEND_NOT_READY_WARNING
-                return jsonify(response), 206
-            return jsonify(response), 200
-
-        # Case 2: Fetch balance for a specific token
-        else:
-            result = await fetch_token_balance(token, floAddress)
-            balance = result.get(token, {}).get('balance', 0)
-
-            response = {
-                'floAddress': floAddress,
-                'token': token,
-                'balance': balance
-            }
-            if not is_backend_ready():
-                response['warning'] = BACKEND_NOT_READY_WARNING
-                return jsonify(response), 206
-            return jsonify(response), 200
-
-    except aiomysql.MySQLError as e:
-        print(f"Database error in floAddressBalance: {e}")
-        return jsonify(description="Database error occurred"), 500
-    except Exception as e:
-        print(f"floAddressBalance: {e}")
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-@app.route('/api/v2/floAddressTransactions/<floAddress>', methods=['GET'])
-async def floAddressTransactions(floAddress):
-    try:
-        # Validate input
-        if floAddress is None:
-            return jsonify(description='floAddress has not been passed'), 400
-        if not check_flo_address(floAddress, is_testnet):
-            return jsonify(description='floAddress validation failed'), 400
-
-        # Validate limit
-        limit = request.args.get('limit')
-        if limit is not None and not check_integer(limit):
-            return jsonify(description='limit validation failed'), 400
-
-        # Get optional token filter
-        token = request.args.get('token')
-        all_transaction_list = []
-
-        if token is None:
-            try:
-                # Fetch associated tokens for the FLO address
-                async with await get_mysql_connection(standardize_db_name("system"), USE_ASYNC=True) as system_conn:
-                    async with system_conn.cursor() as cursor:
-                        query = "SELECT DISTINCT token FROM tokenAddressMapping WHERE tokenAddress = %s"
-                        await cursor.execute(query, (floAddress,))
-                        token_names = [row[0] for row in await cursor.fetchall()]
-
-                # If no tokens found, return 404
-                if not token_names:
-                    return jsonify(description="No tokens associated with the FLO address"), 404
-
-                # Fetch transactions for all associated tokens concurrently
-                tasks = [
-                    fetch_token_transactions(token_name, floAddress, floAddress, limit)
-                    for token_name in token_names
-                ]
-                transaction_data = await asyncio.gather(*tasks)
-
-                # Aggregate transactions from all tokens
-                for data in transaction_data:
-                    all_transaction_list.extend(data)
-
-            except aiomysql.MySQLError as e:
-                print(f"Database error while fetching tokens: {e}")
-                return jsonify(description="Database error occurred"), 500
-
-        else:
-            try:
-                # Fetch transactions for the specified token
-                all_transaction_list = await fetch_token_transactions(
-                    token, floAddress, floAddress, limit
-                )
-
-            except aiomysql.MySQLError as e:
-                print(f"Error accessing token database {token}: {e}")
-                return jsonify(description="Token database error occurred"), 500
-
-        # Sort and format transactions
-        sorted_formatted_transactions = sort_transactions(all_transaction_list)
-
-        # Prepare response
-        response = {
-            "floAddress": floAddress,
-            "transactions": sorted_formatted_transactions
-        }
-        if token:
-            response["token"] = token
-        if not is_backend_ready():
-            response["warning"] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        return jsonify(response), 200
-
-    except Exception as e:
-        print("floAddressTransactions:", e)
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-
-
-
-    
-# SMART CONTRACT APIs
-@app.route('/api/v2/smartContractList', methods=['GET'])
-async def getContractList_v2():
-    try:
-        # Retrieve and validate query parameters
-        contractName = request.args.get('contractName')
-        if contractName:
-            contractName = contractName.strip().lower()
-
-        contractAddress = request.args.get('contractAddress')
-        if contractAddress:
-            contractAddress = contractAddress.strip()
-            if not check_flo_address(contractAddress, is_testnet):
-                return jsonify(description="contractAddress validation failed"), 400
-
-        # Standardize the system database name
-        system_db_name = standardize_db_name("system")
-
-        # Initialize contract list
-        smart_contracts_morphed = []
-
-        # Fetch contracts from the database asynchronously
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Build query dynamically
-                query = "SELECT * FROM activecontracts"
-                conditions = []
-                params = []
-
-                if contractName:
-                    conditions.append("contractName=%s")
-                    params.append(contractName)
-
-                if contractAddress:
-                    conditions.append("contractAddress=%s")
-                    params.append(contractAddress)
-
-                if conditions:
-                    query += " WHERE " + " AND ".join(conditions)
-
-                # Execute query and fetch results
-                await cursor.execute(query, tuple(params))
-                smart_contracts = await cursor.fetchall()
-
-                # Morph the smart contract data
-                smart_contracts_morphed = await smartcontract_morph_helper(smart_contracts)
-
-        # Fetch the committee address list asynchronously
-        committeeAddressList = await refresh_committee_list(APP_ADMIN, apiUrl, int(time.time()))
-
-        # Prepare the response
-        response = {
-            "smartContracts": smart_contracts_morphed,
-            "smartContractCommittee": committeeAddressList,
-        }
-
-        if not is_backend_ready():
-            response["warning"] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-
-        return jsonify(response), 200
-
-    except Exception as e:
-        print("getContractList_v2:", e)
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-    
-@app.route('/api/v2/getSmartContractInfo', methods=['GET'], endpoint='getSmartContractInfoV2')
-async def getContractInfo():
-    try:
-        # Validate query parameters
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        if not contractName:
-            return jsonify(result='error', description="Smart Contract's name hasn't been passed"), 400
-        if not contractAddress:
-            return jsonify(result='error', description="Smart Contract's address hasn't been passed"), 400
-
-        # Standardize the database names
-        contract_db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-        system_db_name = standardize_db_name("system")
-
-        # Initialize the response structure
-        contract_info = {}
-
-        # Fetch contract structure and participants/token details
-        async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as conn_contract:
-            async with conn_contract.cursor() as cursor:
-                # Fetch contract structure
-                await cursor.execute("SELECT attribute, value FROM contractstructure")
-                results = await cursor.fetchall()
-
-                exit_conditions = {}
-                for idx, (attribute, value) in enumerate(results):
-                    if attribute == 'exitconditions':
-                        exit_conditions[idx] = value
-                    else:
-                        contract_info[attribute] = value
-
-                if exit_conditions:
-                    contract_info['userChoice'] = exit_conditions
-
-                # Fetch participant details
-                await cursor.execute("SELECT COUNT(participantAddress) FROM contractparticipants")
-                contract_info['numberOfParticipants'] = (await cursor.fetchone())[0]
-
-                await cursor.execute("SELECT SUM(tokenAmount) FROM contractparticipants")
-                contract_info['tokenAmountDeposited'] = (await cursor.fetchone())[0]
-
-        # Fetch system-level contract details
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor:
-                query = """
-                    SELECT status, incorporationDate, expiryDate, closeDate
-                    FROM activecontracts
-                    WHERE contractName = %s AND contractAddress = %s
-                """
-                await cursor.execute(query, (contractName, contractAddress))
-                system_results = await cursor.fetchone()
-
-                if system_results:
-                    contract_info.update({
-                        'status': system_results[0],
-                        'incorporationDate': system_results[1],
-                        'expiryDate': system_results[2],
-                        'closeDate': system_results[3]
-                    })
-
-        # Handle additional logic for closed contracts
-        if contract_info.get('status') == 'closed' and contract_info.get('contractType') == 'one-time-event':
-            async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as conn_contract:
-                async with conn_contract.cursor() as cursor:
-                    await cursor.execute("""
-                        SELECT transactionType, transactionSubType
-                        FROM contractTransactionHistory
-                        WHERE transactionType = 'trigger'
-                    """)
-                    triggers = await cursor.fetchall()
-
-                    if len(triggers) == 1:
-                        trigger_type = triggers[0][1]
-                        contract_info['triggerType'] = trigger_type
-
-                        # Fetch winning details if user choices exist
-                        if 'userChoice' in contract_info:
-                            if trigger_type is None:
-                                await cursor.execute("""
-                                    SELECT userChoice 
-                                    FROM contractparticipants
-                                    WHERE winningAmount IS NOT NULL
-                                    LIMIT 1
-                                """)
-                                contract_info['winningChoice'] = (await cursor.fetchone())[0]
-
-                                await cursor.execute("""
-                                    SELECT participantAddress, winningAmount
-                                    FROM contractparticipants
-                                    WHERE winningAmount IS NOT NULL
-                                """)
-                                winners = await cursor.fetchall()
-                                contract_info['numberOfWinners'] = len(winners)
-                    else:
-                        return jsonify(result='error', description="Data integrity issue: multiple triggers found"), 500
-
-        # Final response
-        response = {
-            'result': 'ok',
-            'contractName': contractName,
-            'contractAddress': contractAddress,
-            'contractInfo': contract_info
-        }
-
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-
-        return jsonify(response), 200
-
-    except Exception as e:
-        print("getContractInfo:", e)
-        return jsonify(result='error', description="Unexpected error occurred"), 500
-    
-
-@app.route('/api/v2/smartContractParticipants', methods=['GET'])
-async def getcontractparticipants_v2():
-    try:
-        # Validate query parameters
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        if not contractName:
-            return jsonify(description="Smart Contract's name hasn't been passed"), 400
-        if not contractAddress:
-            return jsonify(description="Smart Contract's address hasn't been passed"), 400
-        if not check_flo_address(contractAddress, is_testnet):
-            return jsonify(description="contractAddress validation failed"), 400
-
-        # Standardize database name
-        contractName = contractName.strip().lower()
-        contractAddress = contractAddress.strip()
-        db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-
-        # Fetch contract structure and status
-        contractStructure = await fetchContractStructure(contractName, contractAddress)
-        contractStatus = await fetchContractStatus(contractName, contractAddress)
-
-        # Initialize the response
-        participantInfo = []
-
-        # Async connection to the contract database
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-
-                # Handle external-trigger contracts
-                if 'exitconditions' in contractStructure:
-                    token = contractStructure.get('tokenIdentification', None)
-                    if contractStatus == 'closed':
-                        query = '''
-                            SELECT id, participantAddress, tokenAmount, userChoice, transactionHash
-                            FROM contractparticipants
-                        '''
-                        await cursor.execute(query)
-                        participants = await cursor.fetchall()
-
-                        for row in participants:
-                            await cursor.execute(
-                                'SELECT winningAmount FROM contractwinners WHERE referenceTxHash = %s',
-                                (row[4],)
-                            )
-                            winningAmount = (await cursor.fetchone() or [0])[0]
-                            participantInfo.append({
-                                'participantFloAddress': row[1],
-                                'tokenAmount': row[2],
-                                'userChoice': row[3],
-                                'transactionHash': row[4],
-                                'winningAmount': winningAmount,
-                                'tokenIdentification': token
-                            })
-                    else:
-                        query = '''
-                            SELECT id, participantAddress, tokenAmount, userChoice, transactionHash
-                            FROM contractparticipants
-                        '''
-                        await cursor.execute(query)
-                        participants = await cursor.fetchall()
-
-                        for row in participants:
-                            participantInfo.append({
-                                'participantFloAddress': row[1],
-                                'tokenAmount': row[2],
-                                'userChoice': row[3],
-                                'transactionHash': row[4]
-                            })
-
-                    contractSubtype = 'external-trigger'
-
-                # Handle time-trigger contracts
-                elif 'payeeAddress' in contractStructure:
-                    query = '''
-                        SELECT id, participantAddress, tokenAmount, transactionHash
-                        FROM contractparticipants
-                    '''
-                    await cursor.execute(query)
-                    participants = await cursor.fetchall()
-
-                    for row in participants:
-                        participantInfo.append({
-                            'participantFloAddress': row[1],
-                            'tokenAmount': row[2],
-                            'transactionHash': row[3]
-                        })
-
-                    contractSubtype = 'time-trigger'
-
-                # Handle tokenswap contracts
-                elif contractStructure['contractType'] == 'continuos-event' and contractStructure['subtype'] == 'tokenswap':
-                    query = '''
-                        SELECT id, participantAddress, participationAmount, swapPrice, transactionHash, blockNumber, blockHash, swapAmount
-                        FROM contractparticipants
-                    '''
-                    await cursor.execute(query)
-                    participants = await cursor.fetchall()
-
-                    for row in participants:
-                        participantInfo.append({
-                            'participantFloAddress': row[1],
-                            'participationAmount': row[2],
-                            'swapPrice': float(row[3]),
-                            'transactionHash': row[4],
-                            'blockNumber': row[5],
-                            'blockHash': row[6],
-                            'swapAmount': row[7]
-                        })
-
-                    contractSubtype = 'tokenswap'
-
-                else:
-                    return jsonify(description="Unsupported contract type"), 400
-
-        # Prepare the response
-        response = {
-            'contractName': contractName,
-            'contractAddress': contractAddress,
-            'contractType': contractStructure['contractType'],
-            'contractSubtype': contractSubtype,
-            'participantInfo': participantInfo
-        }
-
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
-    except Exception as e:
-        print("getcontractparticipants_v2:", e)
-        return jsonify(description="Unexpected error occurred"), 500
-
-
-    
-
-@app.route('/api/v2/getParticipantDetails', methods=['GET'], endpoint='getParticipantDetailsV2')
-async def getParticipantDetails():
-    try:
-        floAddress = request.args.get('floAddress')
-        contractName = request.args.get('contractName')
-        contractAddress = request.args.get('contractAddress')
-
-        # Validate input parameters
-        if not floAddress:
-            return jsonify(result='error', description='FLO address hasn\'t been passed'), 400
-
-        if (contractName and not contractAddress) or (contractAddress and not contractName):
-            return jsonify(result='error', description='Pass both, contractName and contractAddress as URL parameters'), 400
-
-        floAddress = floAddress.strip()
-        if contractName:
-            contractName = contractName.strip().lower()
-        if contractAddress:
-            contractAddress = contractAddress.strip()
-
-        # Standardize database names
-        system_db_name = standardize_db_name("system")
-        contract_db_name = standardize_db_name(f"{contractName}_{contractAddress}") if contractName and contractAddress else None
-
-        participationDetailsList = []
-
-        # Connect to the system database asynchronously
-        async with await get_mysql_connection(system_db_name, USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor_system:
-                # Build the query dynamically
-                if contractName and contractAddress:
-                    query = '''
-                        SELECT * 
-                        FROM contractAddressMapping 
-                        WHERE address = %s AND addressType = "participant" AND contractName = %s AND contractAddress = %s
-                    '''
-                    params = (floAddress, contractName, contractAddress)
-                else:
-                    query = '''
-                        SELECT * 
-                        FROM contractAddressMapping 
-                        WHERE address = %s AND addressType = "participant"
-                    '''
-                    params = (floAddress,)
-
-                # Execute the query asynchronously
-                await cursor_system.execute(query, params)
-                participant_address_contracts = await cursor_system.fetchall()
-
-                if not participant_address_contracts:
-                    if not is_backend_ready():
-                        return jsonify(result='error', description=BACKEND_NOT_READY_ERROR), 503
-                    else:
-                        return jsonify(result='error', description='Address hasn\'t participated in any contract'), 404
-
-                # Process each contract the address has participated in
-                for contract in participant_address_contracts:
-                    detailsDict = {}
-                    contract_name = contract[3]
-                    contract_address = contract[4]
-                    contract_db_name = standardize_db_name(f"{contract_name}_{contract_address}")
-
-                    # Fetch contract structure asynchronously
-                    contractStructure = await fetchContractStructure(contract_name, contract_address)
-
-                    # Async connection to the contract database
-                    async with await get_mysql_connection(contract_db_name, USE_ASYNC=True) as conn_contract:
-                        async with conn_contract.cursor() as cursor_contract:
-                            if contractStructure['contractType'] == 'tokenswap':
-                                # Fetch participant details for tokenswap contracts
-                                query = '''
-                                    SELECT participantAddress, participationAmount, receivedAmount, transactionHash, blockNumber, blockHash 
-                                    FROM contractparticipants 
-                                    WHERE participantAddress = %s
-                                '''
-                                await cursor_contract.execute(query, (floAddress,))
-                                participation_details = await cursor_contract.fetchall()
-
-                                participationList = []
-                                for row in participation_details:
-                                    participationList.append({
-                                        'participationAddress': floAddress,
-                                        'participationAmount': row[1],
-                                        'receivedAmount': row[2],
-                                        'transactionHash': row[3],
-                                        'blockNumber': row[4],
-                                        'blockHash': row[5]
-                                    })
-
-                                detailsDict['contractName'] = contract_name
-                                detailsDict['contractAddress'] = contract_address
-                                detailsDict['participationDetails'] = participationList
-
-                            elif contractStructure['contractType'] == 'one-time-event' and 'payeeAddress' in contractStructure:
-                                # Fetch participant details for one-time-event contracts
-                                query = '''
-                                    SELECT tokenAmount, transactionHash 
-                                    FROM contractparticipants 
-                                    WHERE participantAddress = %s
-                                '''
-                                await cursor_contract.execute(query, (floAddress,))
-                                result = await cursor_contract.fetchone()
-
-                                detailsDict['contractName'] = contract_name
-                                detailsDict['contractAddress'] = contract_address
-                                detailsDict['tokenAmount'] = result[0]
-                                detailsDict['transactionHash'] = result[1]
-
-                            # Add more contract type logic here if needed
-
-                        participationDetailsList.append(detailsDict)
-
-        # Finalize the response
-        if not is_backend_ready():
-            return jsonify(
-                result='ok',
-                warning=BACKEND_NOT_READY_WARNING,
-                floAddress=floAddress,
-                type='participant',
-                participatedContracts=participationDetailsList
-            ), 206
-        else:
-            return jsonify(
-                result='ok',
-                floAddress=floAddress,
-                type='participant',
-                participatedContracts=participationDetailsList
-            ), 200
-
-    except aiomysql.MySQLError as db_error:
-        print(f"Database error: {db_error}")
-        return jsonify(result='error', description="Database error occurred"), 500
-    except Exception as e:
-        print(f"getParticipantDetails: {e}")
-        return jsonify(result='error', description="Unexpected error occurred"), 500
-
-
-
-    
-
-@app.route('/api/v2/smartContractTransactions', methods=['GET'])
-async def smartcontracttransactions():
-    try:
-        # Get and validate query parameters
-        contractName = request.args.get('contractName')
-        if not contractName:
-            return jsonify(description="Smart Contract's name hasn't been passed"), 400
-        contractName = contractName.strip().lower()
-
-        contractAddress = request.args.get('contractAddress')
-        if not contractAddress:
-            return jsonify(description="Smart Contract's address hasn't been passed"), 400
-        contractAddress = contractAddress.strip()
-        if not check_flo_address(contractAddress, is_testnet):
-            return jsonify(description="contractAddress validation failed"), 400
-
-        _from = int(request.args.get('_from', 1))  # Page number, default is 1
-        to = int(request.args.get('to', 100))  # Limit per page, default is 100
-
-        if _from < 1:
-            return jsonify(description="_from validation failed"), 400
-        if to < 1:
-            return jsonify(description="to validation failed"), 400
-
-        # Standardize the contract database name
-        contractDbName = standardize_db_name(f"{contractName}_{contractAddress}")
-
-        # Check if the smart contract database exists
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                query = "SELECT SCHEMA_NAME FROM INFORMATION_SCHEMA.SCHEMATA WHERE SCHEMA_NAME = %s"
-                await cursor.execute(query, (contractDbName,))
-                db_exists = await cursor.fetchone()
-
-        if not db_exists:
-            # Handle missing smart contract database
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description="Smart Contract with the given name doesn't exist"), 404
-
-        # Fetch transaction data for the smart contract
-        transactionJsonData = await fetch_contract_transactions(contractName, contractAddress, _from, to)
-        transactionJsonData = sort_transactions(transactionJsonData)
-
-        # Construct response
-        response_data = {
-            "contractName": contractName,
-            "contractAddress": contractAddress,
-            "contractTransactions": transactionJsonData
-        }
-
-        if not is_backend_ready():
-            response_data["warning"] = BACKEND_NOT_READY_WARNING
-            return jsonify(response_data), 206
-        else:
-            return jsonify(response_data), 200
-
-    except ValueError as ve:
-        # Handle invalid input for _from or to
-        print(f"Value error in smartcontracttransactions: {ve}")
-        return jsonify(description="Invalid input for _from or to"), 400
-
-    except Exception as e:
-        # General error handling
-        print(f"smartcontracttransactions: {e}")
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-    
-
-# todo - add options to only ask for active/consumed/returned deposits
-@app.route('/api/v2/smartContractDeposits', methods=['GET'])
-async def smartcontractdeposits():
-    try:
-        # Validate input parameters
-        contractName = request.args.get('contractName')
-        if not contractName:
-            return jsonify(description="Smart Contract's name hasn't been passed"), 400
-        contractName = contractName.strip().lower()
-
-        contractAddress = request.args.get('contractAddress')
-        if not contractAddress:
-            return jsonify(description="Smart Contract's address hasn't been passed"), 400
-        contractAddress = contractAddress.strip()
-        if not check_flo_address(contractAddress, is_testnet):
-            return jsonify(description="contractAddress validation failed"), 400
-
-        # Standardize the database name
-        db_name = standardize_db_name(f"{contractName}_{contractAddress}")
-
-        # Connect to the smart contract database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Fetch distinct deposits with the latest balances
-                distinct_deposits_query = """
-                    SELECT depositorAddress, transactionHash, status, depositBalance 
-                    FROM contractdeposits 
-                    WHERE (transactionHash, id) IN (
-                        SELECT transactionHash, MAX(id) 
-                        FROM contractdeposits 
-                        GROUP BY transactionHash
-                    ) 
-                    ORDER BY id DESC;
-                """
-                await cursor.execute(distinct_deposits_query)
-                distinct_deposits = await cursor.fetchall()
-
-                deposit_info = []
-                for deposit in distinct_deposits:
-                    depositor_address, transaction_hash, status, current_balance = deposit
-
-                    # Fetch the original deposit balance and expiry time asynchronously
-                    original_deposit_query = """
-                        SELECT depositBalance, unix_expiryTime 
-                        FROM contractdeposits 
-                        WHERE transactionHash = %s 
-                        ORDER BY id 
-                        LIMIT 1;
-                    """
-                    await cursor.execute(original_deposit_query, (transaction_hash,))
-                    original_deposit = await cursor.fetchone()
-
-                    if original_deposit:
-                        original_balance, expiry_time = original_deposit
-                        deposit_info.append({
-                            'depositorAddress': depositor_address,
-                            'transactionHash': transaction_hash,
-                            'status': status,
-                            'originalBalance': original_balance,
-                            'currentBalance': current_balance,
-                            'time': expiry_time
-                        })
-
-                # Fetch the current total deposit balance
-                total_deposit_balance_query = """
-                    SELECT SUM(depositBalance) AS totalDepositBalance 
-                    FROM contractdeposits c1 
-                    WHERE id = (
-                        SELECT MAX(id) 
-                        FROM contractdeposits c2 
-                        WHERE c1.transactionHash = c2.transactionHash
-                    );
-                """
-                await cursor.execute(total_deposit_balance_query)
-                current_deposit_balance = await cursor.fetchone()
-
-        # Prepare the response
-        response = {
-            'currentDepositBalance': current_deposit_balance[0] if current_deposit_balance else 0,
-            'depositInfo': deposit_info
-        }
-
-        # Return response based on backend readiness
-        if not is_backend_ready():
-            response['warning'] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
-    except aiomysql.MySQLError as db_error:
-        print(f"Database error in smartcontractdeposits: {db_error}")
-        return jsonify(description="Database error occurred"), 500
-    except Exception as e:
-        print(f"smartcontractdeposits: {e}")
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-    
-@app.route('/api/v2/blockDetails/<blockHash>', methods=['GET'])
-async def blockdetails(blockHash):
-    try:
-        # todo - validate blockHash
-        blockJson = await blockdetailhelper(blockHash)
-        if len(blockJson) != 0:
-            blockJson = json.loads(blockJson[0][0])
-            return jsonify(blockDetails=blockJson), 200
-        else:
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description='Block doesn\'t exist in database'), 404    
-    except Exception as e:
-        print("blockdetails:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-@app.route('/api/v2/transactionDetails/<transactionHash>', methods=['GET'])
-async def transactiondetails1(transactionHash):
-    try:
-        # Fetch transaction details using the helper
-        transactionJsonData = await transactiondetailhelper(transactionHash)
-
-        if transactionJsonData:
-            transactionJson = json.loads(transactionJsonData[0][0])
-            transactionJson = await update_transaction_confirmations(transactionJson)
-            parseResult = json.loads(transactionJsonData[0][1])
-            operation = transactionJsonData[0][2]
-            db_reference = transactionJsonData[0][3]
-
-            sender_address, receiver_address = extract_ip_op_addresses(transactionJson)
-            mergeTx = {**parseResult, **transactionJson}
-            mergeTx['onChain'] = True
-            operationDetails = {}
-
-            # Standardize database name
-            db_name = standardize_db_name(db_reference)
-
-            async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-                async with conn.cursor() as cursor:
-                    if operation == 'smartContractDeposit':
-                        # Handle smart contract deposits
-                        await cursor.execute("""
-                            SELECT depositAmount, blockNumber 
-                            FROM contractdeposits 
-                            WHERE status = 'deposit-return' AND transactionHash = %s
-                        """, (transactionJson['txid'],))
-                        returned_deposit_tx = await cursor.fetchall()
-                        if returned_deposit_tx:
-                            operationDetails['returned_depositAmount'] = returned_deposit_tx[0][0]
-                            operationDetails['returned_blockNumber'] = returned_deposit_tx[0][1]
-
-                        await cursor.execute("""
-                            SELECT depositAmount, blockNumber 
-                            FROM contractdeposits 
-                            WHERE status = 'deposit-honor' AND transactionHash = %s
-                        """, (transactionJson['txid'],))
-                        deposit_honors = await cursor.fetchall()
-                        operationDetails['depositHonors'] = {
-                            'list': [{'honor_amount': honor[0], 'blockNumber': honor[1]} for honor in deposit_honors],
-                            'count': len(deposit_honors)
-                        }
-
-                        await cursor.execute("""
-                            SELECT depositBalance 
-                            FROM contractdeposits 
-                            WHERE id = (SELECT MAX(id) FROM contractdeposits WHERE transactionHash = %s)
-                        """, (transactionJson['txid'],))
-                        depositBalance = await cursor.fetchone()
-                        operationDetails['depositBalance'] = depositBalance[0]
-                        operationDetails['consumedAmount'] = parseResult['depositAmount'] - operationDetails['depositBalance']
-
-                    elif operation == 'tokenswap-participation':
-                        # Handle token swap participation
-                        await cursor.execute("""
-                            SELECT tokenAmount, winningAmount, userChoice 
-                            FROM contractparticipants 
-                            WHERE transactionHash = %s
-                        """, (transactionJson['txid'],))
-                        swap_amounts = await cursor.fetchone()
-
-                        await cursor.execute("SELECT value FROM contractstructure WHERE attribute = 'selling_token'")
-                        structure = await cursor.fetchone()
-
-                        operationDetails = {
-                            'participationAmount': swap_amounts[0],
-                            'receivedAmount': swap_amounts[1],
-                            'participationToken': parseResult['tokenIdentification'],
-                            'receivedToken': structure[0],
-                            'swapPrice_received_to_participation': float(swap_amounts[2])
-                        }
-
-                    elif operation == 'smartContractPays':
-                        # Handle smart contract payouts
-                        await cursor.execute("""
-                            SELECT participantAddress, tokenAmount, userChoice, winningAmount 
-                            FROM contractparticipants 
-                            WHERE winningAmount IS NOT NULL
-                        """)
-                        winner_participants = await cursor.fetchall()
-                        operationDetails = {
-                            'total_winners': len(winner_participants),
-                            'winning_choice': winner_participants[0][2] if winner_participants else None,
-                            'winner_list': [
-                                {
-                                    'participantAddress': participant[0],
-                                    'participationAmount': participant[1],
-                                    'winningAmount': participant[3]
-                                } for participant in winner_participants
-                            ]
-                        }
-
-                    elif operation == 'ote-externaltrigger-participation':
-                        # Handle external-trigger participation
-                        await cursor.execute("""
-                            SELECT winningAmount 
-                            FROM contractparticipants 
-                            WHERE transactionHash = %s
-                        """, (transactionHash,))
-                        winningAmount = await cursor.fetchone()
-                        if winningAmount and winningAmount[0] is not None:
-                            operationDetails['winningAmount'] = winningAmount[0]
-
-                    elif operation == 'tokenswapParticipation':
-                        # Handle token swap participation
-                        contractName, contractAddress = db_reference.rsplit('_', 1)
-                        txhash_txs = await fetch_swap_contract_transactions(contractName, contractAddress, transactionHash)
-                        mergeTx['subTransactions'] = [
-                            tx for tx in txhash_txs if not tx.get('onChain', True)
-                        ]
-
-            mergeTx['operation'] = operation
-            mergeTx['operationDetails'] = operationDetails
-            return jsonify(mergeTx), 200
-
-        else:
-            # Handle no transaction found
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description="Transaction doesn't exist in database"), 404
-
-    except Exception as e:
-        print(f"transactiondetails1: {e}")
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-    
-@app.route('/api/v2/latestTransactionDetails', methods=['GET'])
-async def latestTransactionDetails():
-    try:
-        # Validate the 'limit' parameter
-        limit = request.args.get('limit')
-        if limit is not None and not check_integer(limit):
-            return jsonify(description='limit validation failed'), 400
-
-        # Standardize the database name
-        db_name = standardize_db_name("latestCache")
-
-        # Connect to the database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Build and execute the query
-                if limit is not None:
-                    query = """
-                        SELECT * FROM latestTransactions 
-                        WHERE blockNumber IN (
-                            SELECT DISTINCT blockNumber 
-                            FROM latestTransactions 
-                            ORDER BY blockNumber DESC 
-                            LIMIT %s
-                        ) 
-                        ORDER BY id DESC;
-                    """
-                    await cursor.execute(query, (int(limit),))
-                else:
-                    query = """
-                        SELECT * FROM latestTransactions 
-                        WHERE blockNumber IN (
-                            SELECT DISTINCT blockNumber 
-                            FROM latestTransactions 
-                            ORDER BY blockNumber DESC
-                        ) 
-                        ORDER BY id DESC;
-                    """
-                    await cursor.execute(query)
-
-                # Fetch and process transactions
-                latestTransactions = await cursor.fetchall()
-                tx_list = []
-                for item in latestTransactions:
-                    item = list(item)
-                    tx_parsed_details = {}
-
-                    # Parse transaction details
-                    tx_parsed_details['transactionDetails'] = json.loads(item[3])
-                    tx_parsed_details['transactionDetails'] = await update_transaction_confirmations(tx_parsed_details['transactionDetails'])
-                    tx_parsed_details['parsedFloData'] = json.loads(item[5])
-                    tx_parsed_details['parsedFloData']['transactionType'] = item[4]
-                    tx_parsed_details['transactionDetails']['blockheight'] = int(item[2])
-
-                    # Merge parsed details
-                    merged_tx = {**tx_parsed_details['transactionDetails'], **tx_parsed_details['parsedFloData']}
-                    merged_tx['onChain'] = True
-
-                    # Append to the transaction list
-                    tx_list.append(merged_tx)
-
-        # Return response based on backend readiness
-        if not is_backend_ready():
-            return jsonify(warning=BACKEND_NOT_READY_WARNING, latestTransactions=tx_list), 206
-        else:
-            return jsonify(latestTransactions=tx_list), 200
-
-    except Exception as e:
-        print("latestTransactionDetails:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-    
-
-
-@app.route('/api/v2/latestBlockDetails', methods=['GET'])
-async def latestBlockDetails():
-    try:
-        # Validate the 'limit' parameter
-        limit = request.args.get('limit')
-        if limit is not None and not check_integer(limit):
-            return jsonify(description='limit validation failed'), 400
-
-        # Standardize the database name
-        db_name = standardize_db_name("latestCache")
-
-        # Connect to the database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Build the SQL query
-                if limit is None:
-                    query = """
-                        SELECT jsonData 
-                        FROM (
-                            SELECT * 
-                            FROM latestBlocks 
-                            ORDER BY blockNumber DESC 
-                            LIMIT 4
-                        ) subquery 
-                        ORDER BY id DESC;
-                    """
-                    await cursor.execute(query)
-                else:
-                    query = """
-                        SELECT jsonData 
-                        FROM (
-                            SELECT * 
-                            FROM latestBlocks 
-                            ORDER BY blockNumber DESC 
-                            LIMIT %s
-                        ) subquery 
-                        ORDER BY id DESC;
-                    """
-                    await cursor.execute(query, (int(limit),))
-
-                # Fetch and parse the blocks
-                latestBlocks = await cursor.fetchall()
-                templst = [json.loads(item[0]) for item in latestBlocks]
-
-        # Return response based on backend readiness
-        if not is_backend_ready():
-            return jsonify(warning=BACKEND_NOT_READY_WARNING, latestBlocks=templst), 206
-        else:
-            return jsonify(latestBlocks=templst), 200
-
-    except Exception as e:
-        print("latestBlockDetails:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-    
-
-@app.route('/api/v2/blockTransactions/<blockHash>', methods=['GET'])
-async def blocktransactions(blockHash):
-    try:
-        blockJson = await blockdetailhelper(blockHash)
-        if len(blockJson) != 0:
-            blockJson = json.loads(blockJson[0][0])
-            blocktxlist = blockJson['txs']
-            blocktxs = []
-            for i in range(len(blocktxlist)):
-                temptx = await transactiondetailhelper(blocktxlist[i]['txid'])                        
-                transactionJson = json.loads(temptx[0][0])
-                parseResult = json.loads(temptx[0][1])
-                blocktxs.append({**parseResult , **transactionJson})
-
-                # TODO (CRITICAL): Write conditions to include and filter on chain and offchain transactions
-                #blocktxs['onChain'] = True
-            return jsonify(transactions=blocktxs, blockKeyword=blockHash), 200
-        else:
-            if not is_backend_ready():
-                return jsonify(description=BACKEND_NOT_READY_ERROR), 503
-            else:
-                return jsonify(description='Block doesn\'t exist in database'), 404
-
-
-    except Exception as e:
-        print("blocktransactions:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-    
-
-@app.route('/api/v2/categoriseString/<urlstring>', methods=['GET'])
-async def categoriseString_v2(urlstring):
-    try:
-        # Check if the string is a transaction or block hash
-        async with aiohttp.ClientSession() as session:
-            # Check if it's a transaction hash
-            async with session.get(f"{apiUrl}api/v1/tx/{urlstring}") as response:
-                if response.status == 200:
-                    return jsonify(type='transaction'), 200
-
-            # Check if it's a block hash
-            async with session.get(f"{apiUrl}api/v1/block/{urlstring}") as response:
-                if response.status == 200:
-                    return jsonify(type='block'), 200
-
-        # Check if the string is a token name or a smart contract name
-        db_name = standardize_db_name("system")
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Check if it's a token
-                query = """
-                    SELECT DISTINCT tokenName 
-                    FROM tokenInfo
-                    WHERE LOWER(tokenName) = %s;
-                """
-                await cursor.execute(query, (urlstring.lower(),))
-                token_result = await cursor.fetchone()
-                if token_result:
-                    return jsonify(type='token'), 200
-
-                # Check if it's a smart contract name
-                query = """
-                    SELECT DISTINCT contractName 
-                    FROM activeContracts
-                    WHERE LOWER(contractName) = %s;
-                """
-                await cursor.execute(query, (urlstring.lower(),))
-                contract_result = await cursor.fetchone()
-                if contract_result:
-                    return jsonify(type='smartContract'), 200
-
-        # If no match, classify as noise
-        return jsonify(type='noise'), 200
-
-    except Exception as e:
-        print("categoriseString_v2:", e)
-        return jsonify(description="Internal Error"), 500
-
-
-
-
-# Assuming `get_mysql_connection` has been updated to work with aiomysql and async
-
-@app.route('/api/v2/tokenSmartContractList', methods=['GET'])
-async def tokenSmartContractList():
-    try:
-        # Prefix for databases
-        database_prefix = f"{mysql_config.database_prefix}_"
-        database_suffix = "_db"
-
-        # Initialize lists for tokens and contracts
-        token_list = []
-
-        # Step 1: Enumerate all databases asynchronously
-        async with await get_mysql_connection("information_schema", no_standardize=True, USE_ASYNC=True) as conn_info:
-            async with conn_info.cursor() as cursor:
-                query = f"""
-                    SELECT SCHEMA_NAME 
-                    FROM SCHEMATA 
-                    WHERE SCHEMA_NAME LIKE '{database_prefix}%' 
-                      AND SCHEMA_NAME LIKE '%{database_suffix}'
-                """
-                await cursor.execute(query)
-                all_databases = await cursor.fetchall()
-
-                # Filter token databases from smart contract databases
-                for db_name in all_databases:
-                    stripped_name = db_name[0][len(database_prefix):-len(database_suffix)]
-
-                    # Exclude "latestCache" and "system" databases
-                    if stripped_name in ["latestCache", "system"]:
-                        continue
-
-                    parts = stripped_name.split('_')
-                    if len(parts) == 1:  # Token database format (e.g., usd, inr)
-                        token_list.append(stripped_name)
-
-        # Step 2: Fetch smart contracts from the `system` database
-        async with await get_mysql_connection("system", USE_ASYNC=True) as conn_system:
-            async with conn_system.cursor() as cursor:
-                # Validate and process query parameters
-                contractName = request.args.get('contractName')
-                contractAddress = request.args.get('contractAddress')
-
-                if contractName:
-                    contractName = contractName.strip().lower()
-                if contractAddress:
-                    contractAddress = contractAddress.strip()
-                    if not check_flo_address(contractAddress, is_testnet):
-                        return jsonify(description='contractAddress validation failed'), 400
-
-                # Fetch smart contracts matching the filters
-                query = """
-                    SELECT * 
-                    FROM activeContracts 
-                    WHERE (%s IS NULL OR LOWER(contractName) = %s) 
-                      AND (%s IS NULL OR contractAddress = %s)
-                """
-                await cursor.execute(query, (contractName, contractName, contractAddress, contractAddress))
-                smart_contracts = await cursor.fetchall()
-
-                # Morph the smart contract data for response formatting
-                smart_contracts_morphed = await smartcontract_morph_helper(smart_contracts)
-
-        # Step 3: Fetch committee address list
-        committeeAddressList = await refresh_committee_list(APP_ADMIN, apiUrl, int(time.time()))
-
-        # Step 4: Prepare and send the response
-        response = {
-            "tokens": token_list,
-            "smartContracts": smart_contracts_morphed,
-            "smartContractCommittee": committeeAddressList
-        }
-
-        if not is_backend_ready():
-            response["warning"] = BACKEND_NOT_READY_WARNING
-            return jsonify(response), 206
-        else:
-            return jsonify(response), 200
-
-    except Exception as e:
-        print("tokenSmartContractList:", e)
-        return jsonify(description=INTERNAL_ERROR), 500
-
-
-
-
-
-    
-class ServerSentEvent:
-    def __init__(
-            self,
-            data: str,
-            *,
-            event: Optional[str] = None,
-            id: Optional[int] = None,
-            retry: Optional[int] = None,
-    ) -> None:
-        self.data = data
-        self.event = event
-        self.id = id
-        self.retry = retry
-
-    def encode(self) -> bytes:
-        message = f"data: {self.data}"
-        if self.event is not None:
-            message = f"{message}\nevent: {self.event}"
-        if self.id is not None:
-            message = f"{message}\nid: {self.id}"
-        if self.retry is not None:
-            message = f"{message}\nretry: {self.retry}"
-        message = f"{message}\r\n\r\n"
-        return message.encode('utf-8')
-
-@app.route('/sse')
-async def sse():
-    queue = asyncio.Queue()
-    app.clients.add(queue)
-
-    async def send_events():
-        while True:
-            try:
-                data = await queue.get()
-                event = ServerSentEvent(data)
-                yield event.encode()
-            except asyncio.CancelledError as error:
-                app.clients.remove(queue)
-
-    response = await make_response(
-        send_events(),
-        {
-            'Content-Type': 'text/event-stream',
-            'Cache-Control': 'no-cache',
-            'Transfer-Encoding': 'chunked',
-        },
-    )
-    response.timeout = None
-    return response
-
-
-@app.route('/api/v2/prices', methods=['GET'])
-async def priceData():
-    try:
-        # Standardize the system database name
-        db_name = standardize_db_name("system")
-
-        # Connect to the database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Query to fetch rate pairs and prices
-                query = "SELECT ratepair, price FROM ratepairs;"
-                await cursor.execute(query)
-                ratepairs = await cursor.fetchall()
-
-                # Prepare a dictionary of prices
-                prices = {ratepair[0]: ratepair[1] for ratepair in ratepairs}
-
-                # Return the prices
-                return jsonify(prices=prices), 200
-
-    except Exception as e:
-        print("priceData:", e)
-        return jsonify(description="Internal Error"), 500
-
-
-
-#######################
-#######################
-
-async def initialize_db():
+def backup_and_rebuild_latestcache(keywords=None):
     """
-    Initializes the `ratepairs` table in the `system` database if it does not exist,
-    and populates it with default values.
+    Back up the current databases, reset all databases, and rebuild the latestCache database.
+
+    :param keywords: List of keywords to filter transactions. If None, processes all transactions.
     """
+    # Define database names
+    latestcache_db = f"{mysql_config.database_prefix}_latestCache_db"
+    latestcache_backup_db = f"{latestcache_db}_backup"
+    system_db = f"{mysql_config.database_prefix}_system_db"
+    system_backup_db = f"{system_db}_backup"
+
+    # Step 1: Create backups
+    logger.info("Creating backups of the latestCache and system databases...")
+    if not backup_database_to_temp(latestcache_db, latestcache_backup_db):
+        logger.error(f"Failed to create backup for latestCache database '{latestcache_db}'.")
+        return
+    if not backup_database_to_temp(system_db, system_backup_db):
+        logger.error(f"Failed to create backup for system database '{system_db}'.")
+        return
+
+    # Step 2: Reset databases (skip backup databases during reset)
+    logger.info("Resetting all databases except backups...")
     try:
-        # Standardize database name for the system database
-        db_name = standardize_db_name("system")
-
-        # Connect to the database asynchronously
-        async with await get_mysql_connection(db_name, USE_ASYNC=True) as conn:
-            async with conn.cursor() as cursor:
-                # Create the `ratepairs` table if it does not exist
-                await cursor.execute("""
-                    CREATE TABLE IF NOT EXISTS ratepairs (
-                        id INT AUTO_INCREMENT PRIMARY KEY,
-                        ratepair VARCHAR(20) NOT NULL UNIQUE,
-                        price FLOAT NOT NULL
-                    )
-                """)
-
-                # Check if the table contains any data
-                await cursor.execute("SELECT COUNT(*) FROM ratepairs")
-                count = (await cursor.fetchone())[0]
-
-                if count == 0:
-                    # Insert default rate pairs if the table is empty
-                    default_ratepairs = [
-                        ('BTCBTC', 1),
-                        ('BTCUSD', -1),
-                        ('BTCINR', -1),
-                        ('FLOUSD', -1),
-                        ('FLOINR', -1),
-                        ('USDINR', -1)
-                    ]
-                    await cursor.executemany(
-                        "INSERT INTO ratepairs (ratepair, price) VALUES (%s, %s)",
-                        default_ratepairs
-                    )
-                    await conn.commit()
-
-                    # Update the prices
-                    await updatePrices()
-
+        init_storage_if_not_exist(reset=True, exclude_backups=True)  # Pass a flag to avoid dropping backup databases
     except Exception as e:
-        print(f"Error initializing the database: {e}")
+        logger.error(f"Failed to reset databases: {e}")
+        return
+
+    # Step 3: Extract last block scanned from backup
+    try:
+        logger.info("Extracting last block scanned from backup system database...")
+        backup_engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{system_backup_db}", echo=False)
+        with sessionmaker(bind=backup_engine)() as session:
+            last_block_scanned_entry = session.query(SystemData).filter_by(attribute='lastblockscanned').first()
+            if not last_block_scanned_entry:
+                raise ValueError("No 'lastblockscanned' entry found in backup system database.")
+            last_block_scanned = int(last_block_scanned_entry.value)
+            logger.info(f"Last block scanned retrieved: {last_block_scanned}")
+    except Exception as e:
+        logger.error(f"Failed to retrieve lastblockscanned from backup system database: {e}")
+        return
+
+    # Step 4: Reprocess blocks from the backup
+    try:
+        logger.info("Starting reprocessing of blocks from backup...")
+        backup_engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{latestcache_backup_db}", echo=False)
+        with sessionmaker(bind=backup_engine)() as session:
+            stored_blocks = session.query(LatestBlocks).order_by(LatestBlocks.blockNumber).all()
+            if not stored_blocks:
+                logger.warning("No blocks found in backed-up latestCache database. Aborting rebuild.")
+                return
+
+            for block_entry in stored_blocks:
+                try:
+                    blockinfo = json.loads(block_entry.jsonData)
+                    block_number = blockinfo.get("height", block_entry.blockNumber)
+                    block_hash = blockinfo.get("hash", block_entry.blockHash)
+
+                    logger.info(f"Reprocessing block {block_number} with hash {block_hash}...")
+                    processBlock(blockindex=block_number, blockhash=block_hash, blockinfo=blockinfo, keywords=keywords)
+                except Exception as e:
+                    logger.error(f"Error processing block {block_entry.blockNumber}: {e}")
+        logger.info("Rebuild of latestCache database completed successfully.")
+    except Exception as e:
+        logger.error(f"Error during rebuild of latestCache database from backup: {e}")
+        return
+
+    # Step 5: Update lastblockscanned in the new system database
+    try:
+        logger.info("Updating lastblockscanned in the new system database...")
+        engine = create_engine(f"mysql+pymysql://{mysql_config.username}:{mysql_config.password}@{mysql_config.host}/{system_db}", echo=False)
+        with sessionmaker(bind=engine)() as session:
+            entry = session.query(SystemData).filter_by(attribute='lastblockscanned').first()
+            if entry:
+                entry.value = str(last_block_scanned)
+            else:
+                session.add(SystemData(attribute='lastblockscanned', value=str(last_block_scanned)))
+            session.commit()
+            logger.info(f"Updated lastblockscanned to {last_block_scanned}.")
+    except Exception as e:
+        logger.error(f"Failed to update lastblockscanned: {e}")
+        return
+
+    # Step 6: Process remaining blocks
+    try:
+        logger.info("Processing remaining blocks...")
+        current_block_height = fetch_current_block_height()
+        for blockindex in range(last_block_scanned + 1, current_block_height + 1):
+            if blockindex in IGNORE_BLOCK_LIST:
+                continue
+            logger.info(f"Processing block {blockindex} from the blockchain...")
+            processBlock(blockindex=blockindex, keywords=keywords)
+    except Exception as e:
+        logger.error(f"Error processing remaining blocks: {e}")
 
 
 
+# Delete database and smartcontract directory if reset is set to 1
+if args.reset == 1:
+    logger.info("Resetting the database. ")
+    init_storage_if_not_exist(reset=True)
+else:
+    init_storage_if_not_exist()
 
-def set_configs(config):
-    global DATA_PATH, apiUrl, FLO_DATA_DIR, API_VERIFY, debug_status, APIHOST, APIPORT, APP_ADMIN, NET, is_testnet
-    
-    # Handle paths and API details
-    DATA_PATH = config.get("API", "dbfolder", fallback="")
-    apiUrl = config.get("API", "apiUrl", fallback="https://blockbook.ranchimall.net/api/")
-    FLO_DATA_DIR = config.get("API", "FLO_DATA_DIR", fallback="")
-    
-    # Handle API verification
-    API_VERIFY = config.getboolean("DEFAULT", "API_VERIFY", fallback=True)
-    
-    # Debug status and server details
-    debug_status = config.getboolean("API", "debug_status", fallback=False)
-    APIHOST = config.get("API", "HOST", fallback="localhost")
-    APIPORT = config.getint("API", "PORT", fallback=5432)
-    
-    # Admin and network settings
-    APP_ADMIN = config.get("DEFAULT", "APP_ADMIN", fallback="")
-    NET = config.get("DEFAULT", "NET", fallback="mainnet")
-    
-    # Determine if running on testnet
-    is_testnet = NET == 'testnet'
+# Backup and rebuild latestCache and system.db if rebuild flag is set
+if args.rebuild == 1:
+    # Use the unified rebuild function with or without keywords
+    backup_and_rebuild_latestcache(keywords=args.keywords if args.keywords else None)
+    logger.info("Rebuild completed. Exiting...")
+    sys.exit(0)
 
 
-
-# This function will run the async updatePrices within the event loop
-async def run_async_update_prices():
-    """Runs the async updatePrices function within the event loop."""
-    await updatePrices()  # Use await to run the async function
-
-async def shutdown(loop, signal=None):
-    """
-    Gracefully shuts down the event loop and cancels all pending tasks.
-    """
-    if signal:
-        print(f"Received exit signal {signal.name}. Shutting down...")
-    
-    tasks = [t for t in asyncio.all_tasks() if t is not asyncio.current_task()]
-    
-    for task in tasks:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
-    
-    loop.stop()
-
-def init_process():
-    loop = asyncio.get_event_loop()
-    loop.create_task(initialize_db())
-
-    scheduler = BackgroundScheduler()
-    scheduler.add_job(lambda: asyncio.create_task(run_async_update_prices()), trigger="interval", seconds=600)
-    scheduler.start()
-
-    atexit.register(lambda: asyncio.run(shutdown(loop)))
-
-def start_api_server(config):
-    set_configs(config)
-    init_process()
-    print("Starting API server at port=", APIPORT)
-    app.run(debug=debug_status, host=APIHOST, port=APIPORT)
-
+# Determine API source for block and transaction information
 if __name__ == "__main__":
-    start_api_server(config)
+    # MAIN LOGIC STARTS
+    # scan from the latest block saved locally to latest network block
+
+    scanBlockchain()
+
+    logger.debug("Completed first scan")
+
+    # At this point the script has updated to the latest block
+    # Now we connect to Blockbook's websocket API to get information about the latest blocks
+    # Neturl is the URL for Blockbook API whose websocket endpoint is being connected to
+
+    asyncio.get_event_loop().run_until_complete(connect_to_websocket(websocket_uri)) 
+    

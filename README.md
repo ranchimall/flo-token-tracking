@@ -1,3 +1,6 @@
+# What is it
+This contains both RanchiMall Token SmartContract Scanner, as well as API on MYSQL. Installation for Scanner will also install all dependencies for API.
+
 # Howto start the MYSQL version
 
 ## Setup setps
@@ -7,15 +10,19 @@
 3. Run setup.sh to install python3.7 virtual environment, install and configure MySQL if it does not exist, install all dependencies and then start the application.
 
 ## How to run
-1. python3.7 tracktokens-smartcontracts.py 
-2. python3.7 tracktokens-smartcontracts.py --reset
-3. python3.7 tracktokens-smartcontracts.py --rebuild
-4. python3.7 tracktokens-smartcontracts.py --rebuild usd# tokenroom#
+### Scanner
+1. python3 tracktokens-smartcontracts.py 
+2. python3 tracktokens-smartcontracts.py --reset
+3. python3 tracktokens-smartcontracts.py --rebuild
+4. python3 tracktokens-smartcontracts.py --rebuild usd# tokenroom#
 
-1. python3.7 tracktokens-smartcontracts.py => To run normally
-2. python3.7 tracktokens-smartcontracts.py --reset => To remove all data and start from scratch
-3. python3.7 tracktokens-smartcontracts.py --rebuild => To reprocess existing blockchain data for ALL TOKENS as stored in latestBlocks table of rm_latestCache_db database
-4. python3.7 tracktokens-smartcontracts.py --rebuild usd# tokenroom# => To reprocess existing blockchain data for USD# TOKENROOM# as stored in latestBlocks table of rm_latestCache_db database
+1. python3 tracktokens-smartcontracts.py => To run normally
+2. python3 tracktokens-smartcontracts.py --reset => To remove all data and start from scratch
+3. python3 tracktokens-smartcontracts.py --rebuild => To reprocess existing blockchain data for ALL TOKENS as stored in latestBlocks table of rm_latestCache_db database
+4. python3 tracktokens-smartcontracts.py --rebuild usd# tokenroom# => To reprocess existing blockchain data for USD# TOKENROOM# as stored in latestBlocks table of rm_latestCache_db database
+
+### API
+1.python3 ranchimallflo_api.py
 
 # FLO Token & Smart Contract System 
 [![Test flodata parsing](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml/badge.svg?branch=swap-statef-testing)](https://github.com/ranchimall/flo-token-tracking/actions/workflows/test_parsing.yml)

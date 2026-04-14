@@ -3,7 +3,6 @@ aiohttp
 aiomysql
 apscheduler==3.9.1
 arrow==1.1.0
-arduino
 bidict==0.21.2
 blinker==1.4
 cachetools
